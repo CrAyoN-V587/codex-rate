@@ -3,7 +3,7 @@ import queue
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from codex_rate.app import Strip
 
@@ -53,6 +53,9 @@ class StripTests(unittest.TestCase):
         strip.hwnd = 20
         strip.args = SimpleNamespace(preview=False, demo=False, diagnostics=None)
         strip.monitor = Mock()
+        strip.monitor_running = True
+        strip.startup = Mock()
+        strip.startup.is_enabled.return_value = False
         self.threads = ["12345678-aaaa-bbbb-cccc-123456789abc",
                         "87654321-aaaa-bbbb-cccc-abcdef123456"]
         strip.monitor.index.paths = [Path("rollout-" + t + ".jsonl") for t in self.threads]
@@ -115,6 +118,48 @@ class StripTests(unittest.TestCase):
         menu.invoke("退出 Codex Rate")
         strip.close.assert_called_once()
 
+    def test_startup_menu_enables_and_disables_only_via_startup_module(self):
+        strip = self.strip
+        strip.popup()
+        strip.menu.invoke("启用开机自启动")
+        strip.startup.enable.assert_called_once()
+        strip.startup.disable.assert_not_called()
+        strip.startup.is_enabled.return_value = True
+        strip.menu_open = False
+        strip.popup()
+        strip.menu.invoke("关闭开机自启动")
+        strip.startup.disable.assert_called_once()
+
+    def test_background_waits_without_starting_readers_then_attaches(self):
+        strip = self.strip
+        strip.monitor_running = False
+        strip.native.host.return_value = (None, None, True)
+        strip.tick()
+        strip.monitor.start.assert_not_called()
+        strip.root.withdraw.assert_called_once()
+        strip.root.deiconify.assert_not_called()
+        strip.native.host.return_value = (10, (0, 0, 1200, 800), True)
+        strip.tick()
+        strip.monitor.start.assert_called_once()
+        self.assertTrue(strip.monitor_running)
+        strip.tick()
+        strip.monitor.start.assert_called_once()
+
+    def test_host_exit_stops_readers_and_a_new_host_restarts_cleanly(self):
+        strip = self.strip
+        strip.args.home = Path("codex-home")
+        old = strip.monitor
+        old.pinned = None
+        replacement = Mock()
+        with patch("codex_rate.app.Monitor", return_value=replacement):
+            strip.sync_monitor(False)
+        old.close.assert_called_once()
+        self.assertFalse(strip.monitor_running)
+        replacement.start.assert_not_called()
+        strip.sync_monitor(True)
+        replacement.start.assert_called_once()
+        self.assertTrue(strip.monitor_running)
+
     def test_dismissal_restores_nonactivating_strip_and_allows_reopen(self):
         strip = self.strip
         strip.popup()
@@ -169,6 +214,18 @@ class StripTests(unittest.TestCase):
         strip.host_rect = None
         strip.reset_position()
         strip.native.place.assert_called_once_with(strip.root, 100, 100)
+
+    def test_initial_hidden_layout_matches_painted_surface_size(self):
+        strip = self.strip
+        strip.frame = Mock()
+        strip.frame.winfo_reqwidth.return_value = 480
+        strip.frame.winfo_reqheight.return_value = 50
+        strip.surface = Mock()
+        strip.outline, strip.body = 1, 2
+        strip.layout()
+        requested = strip.surface.configure.call_args.kwargs
+        geometry = strip.root.geometry.call_args.args[0]
+        self.assertEqual(geometry, f"{requested['width']}x{requested['height']}")
 
     def test_exit_cancels_menu_checks_before_destroying_window(self):
         strip = self.strip

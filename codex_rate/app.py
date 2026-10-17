@@ -9,6 +9,7 @@ from .ipc import IpcWatcher
 from .active import ActiveWatcher
 from .metrics import Meter, compact
 from .reader import SessionIndex, SessionReader, codex_home
+from . import startup
 
 
 class Monitor:
@@ -106,7 +107,8 @@ class Monitor:
         self.stop.set()
         self.ipc.stop.set()
         self.active.close()
-        self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            self.thread.join(timeout=2)
 
 
 def load_settings(path):
@@ -127,10 +129,12 @@ class Strip:
         from .windows import Tray
 
         self.tk, self.native, self.args = tk, native, args
+        self.startup = startup
         self.settings_path = args.settings
         self.settings = {"theme": "light", "right": 26, "bottom": 66}
         self.settings.update(load_settings(self.settings_path))
         self.root = tk.Tk()
+        self.root.withdraw()
         self.root.title("Codex Rate")
         self.root.overrideredirect(not args.preview)
         self.root.attributes("-topmost", True)
@@ -142,9 +146,11 @@ class Strip:
         self.surface = tk.Canvas(self.root, bg=self.transparent, bd=0, highlightthickness=0)
         self.surface.pack(fill="both", expand=True)
         self.outline = self.surface.create_polygon(0, 0, 1, 0, 1, 1, 0, 1,
-            smooth=True, splinesteps=24, width=1)
+            smooth=True, splinesteps=24, width=0)
+        self.body = self.surface.create_polygon(0, 0, 1, 0, 1, 1, 0, 1,
+            smooth=True, splinesteps=24, width=0)
         self.frame = tk.Frame(self.surface, bd=0)
-        self.surface.create_window(12, 5, anchor="nw", window=self.frame)
+        self.surface.create_window(12, 8, anchor="nw", window=self.frame)
         self.frame.bind("<Configure>", self.layout)
         self.status = tk.Label(self.frame, text="●", font=("Segoe UI", 10), padx=5)
         self.status.pack(side="left")
@@ -174,11 +180,12 @@ class Strip:
         self.force_show_until = 0.0
         self.paint()
         self.root.update_idletasks()
+        self.layout()
+        self.root.update_idletasks()
         self.hwnd = (native.user.GetAncestor(self.root.winfo_id(), 2)
                      if args.preview else native.tool_window(self.root))
         self.monitor = Monitor(args.home, args.thread)
-        if not args.demo:
-            self.monitor.start()
+        self.monitor_running = False
         self.tray = Tray(native)
         self.tray.start()
         self.bind_children(self.surface)
@@ -203,15 +210,21 @@ class Strip:
 
     def layout(self, _=None):
         width = self.frame.winfo_reqwidth() + 24
-        height = self.frame.winfo_reqheight() + 10
+        height = self.frame.winfo_reqheight() + 16
         radius = min(16, height / 2)
-        left, top, right, bottom = 0.5, 0.5, width - 0.5, height - 0.5
         self.surface.configure(width=width, height=height)
-        self.surface.coords(self.outline,
-            left + radius, top, right - radius, top, right, top,
-            right, top + radius, right, bottom - radius, right, bottom,
-            right - radius, bottom, left + radius, bottom, left, bottom,
-            left, bottom - radius, left, top + radius, left, top)
+        # A withdrawn Tk window otherwise retains Canvas's large default size
+        # when its first native host-placement event arrives before mapping.
+        self.root.geometry(f"{width}x{height}")
+        # A filled outer silhouette remains continuous behind native child windows.
+        for shape, inset in ((self.outline, 0), (self.body, 3)):
+            left, top, right, bottom = inset, inset, width - inset, height - inset
+            r = max(0, radius - inset)
+            self.surface.coords(shape,
+                left + r, top, right - r, top, right, top,
+                right, top + r, right, bottom - r, right, bottom,
+                right - r, bottom, left + r, bottom, left, bottom,
+                left, bottom - r, left, top + r, left, top)
 
     def paint(self):
         dark = self.settings["theme"] == "dark"
@@ -229,8 +242,8 @@ class Strip:
                 color(child)
 
         color(self.frame)
-        self.surface.itemconfigure(self.outline, fill=self.bg,
-                                   outline="#a0a0a0" if dark else "#111111")
+        self.surface.itemconfigure(self.outline, fill="#a0a0a0" if dark else "#111111", outline="")
+        self.surface.itemconfigure(self.body, fill=self.bg, outline="")
         for field in self.fields:
             field.configure(fg=self.fg)
         self.menu_button.configure(fg=self.fg)
@@ -253,6 +266,9 @@ class Strip:
     def tick(self):
         if self.closed:
             return
+        _, rect, visible = self.native.host()
+        self.host_rect = rect
+        self.sync_monitor(rect is not None)
         value = self.data()
         m = value["measurement"]
         unavailable = bool(value["error"])
@@ -265,8 +281,6 @@ class Strip:
         self.status.configure(text="演示" if self.args.demo else "最近" if value["mode"] == "recent" else "●",
             fg="#e9b86e" if unavailable or value["mode"] == "recent" else self.accent)
         self.root.update_idletasks()
-        _, rect, visible = self.native.host()
-        self.host_rect = rect
         force_show = time.monotonic() < self.force_show_until
         interacting = (self.menu_open or self.drag is not None or
                        (self.detail is not None and self.detail.winfo_exists()))
@@ -279,8 +293,8 @@ class Strip:
         elif rect:
             self.root.withdraw()
         else:
-            # Keep a discoverable waiting strip until Codex is started.
-            self.root.deiconify()
+            # Logon starts quietly; the tray remains the entry point while waiting.
+            self.root.withdraw()
         if self.detail and self.detail.winfo_exists():
             self.detail_text.configure(text=self.describe(value))
         while not self.tray.events.empty():
@@ -293,7 +307,19 @@ class Strip:
             else:
                 self.popup()
         if not self.closed:
-            self.tick_handle = self.root.after(400, self.tick)
+            self.tick_handle = self.root.after(400 if rect or interacting else 1000, self.tick)
+
+    def sync_monitor(self, host_present):
+        if self.args.demo:
+            return
+        if host_present and not self.monitor_running:
+            self.monitor.start()
+            self.monitor_running = True
+        elif not host_present and self.monitor_running:
+            pinned = self.monitor.pinned
+            self.monitor.close()
+            self.monitor = Monitor(self.args.home, pinned)
+            self.monitor_running = False
 
     def describe(self, value):
         m = value["measurement"]
@@ -305,7 +331,7 @@ class Strip:
                   "active": "本轮进行中 · 响应结束后刷新", "completed": "本轮完成",
                   "aborted": "本轮已取消 · 不显示 TPS"}
         number = lambda n: "--" if n is None else f"{n:,}"
-        lines = ["CODEX RATE  /  0.2.0", "",
+        lines = ["CODEX RATE  /  0.3.0", "",
                  names[value["mode"]], f"会话：{value['thread'] or '--'}",
                  states.get(m["state"], m["state"]), "",
                  f"本轮输出：{number(m['output'])} token（含推理）",
@@ -383,6 +409,8 @@ class Strip:
         menu.add_separator()
         menu.add_command(label="切换明暗主题", command=self.toggle_theme)
         menu.add_command(label="重置位置", command=self.reset_position)
+        menu.add_command(label="关闭开机自启动" if self.startup.is_enabled() else "启用开机自启动",
+                         command=self.toggle_startup)
         menu.add_separator()
         menu.add_command(label="退出 Codex Rate", command=self.close)
         x = event.x_root if event else self.root.winfo_pointerx()
@@ -422,6 +450,16 @@ class Strip:
         self.settings["theme"] = "light" if self.settings["theme"] == "dark" else "dark"
         self.paint()
         self.save()
+
+    def toggle_startup(self):
+        from tkinter import messagebox
+        try:
+            if self.startup.is_enabled():
+                self.startup.disable()
+            else:
+                self.startup.enable()
+        except OSError as exc:
+            messagebox.showerror("Codex Rate", f"自启动设置失败：{type(exc).__name__}", parent=self.root)
 
     def reset_position(self):
         self.settings.update(right=26, bottom=66)
@@ -492,10 +530,21 @@ def main():
     parser.add_argument("--snapshot", action="store_true", help="Read-only numeric JSON snapshot")
     parser.add_argument("--demo", action="store_true", help="Clearly labelled synthetic UI preview")
     parser.add_argument("--preview", action="store_true", help="Show as an independent titled window")
+    parser.add_argument("--background", action="store_true", help="Wait quietly in tray until Codex appears")
+    startup_flags = parser.add_mutually_exclusive_group()
+    startup_flags.add_argument("--install-startup", action="store_true", help="Enable current-user logon startup")
+    startup_flags.add_argument("--uninstall-startup", action="store_true", help="Disable current-user logon startup")
     parser.add_argument("--exit-after", type=float, help="Close after N seconds (GUI smoke checks)")
     parser.add_argument("--diagnostics", type=Path, help="Write numeric-only state on GUI exit")
     parser.add_argument("--settings", type=Path, default=Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CodexRate" / "settings.json")
     args = parser.parse_args()
+    if args.install_startup or args.uninstall_startup:
+        try:
+            result = startup.enable() if args.install_startup else startup.disable()
+        except OSError as exc:
+            parser.exit(1, f"Startup change failed: {exc}\n")
+        print(result)
+        return
     if args.thread:
         import uuid
         try:
@@ -524,7 +573,8 @@ def main():
     native = Native()
     native.dpi()
     if not native.single_instance("-demo" if args.demo else ""):
-        messagebox.showinfo("Codex Rate", "状态条已在运行。请使用托盘图标查看详情或退出。")
+        if not args.background:
+            messagebox.showinfo("Codex Rate", "状态条已在运行。请使用托盘图标查看详情或退出。")
         native.close()
         return
     strip = Strip(args, native)
