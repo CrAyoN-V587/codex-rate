@@ -1,114 +1,153 @@
 # Codex Rate
 
-Windows 上只读的 Codex 桌面悬浮状态条：**有效 TPS · 本轮输出 · 缓存命中率**。使用圆角、白底、黑字和约 3 像素黑色外轮廓，自动跟随左侧选中的本地对话，并支持当前用户登录自启动。
+Codex Rate 是面向 Windows Codex 桌面客户端的本地监测工具，通过悬浮状态条显示**有效 TPS、本轮输出 Token 和缓存命中率**，并跟随左侧选中的本地对话切换。
 
-运行时不需要 API Key，不代理请求，不修改 Codex、认证、配置或会话文件。读取日志时只提取计数、计时和会话身份；不保存或展示对话正文。
+本项目为独立维护的第三方工具，非 OpenAI 官方产品，与 OpenAI 无隶属关系。
 
-## 使用
+[下载预发布版本](https://github.com/CrAyoN-V587/codex-rate/releases) · [版本说明](RELEASE_NOTES.md) · [Windows 11 兼容性](https://github.com/CrAyoN-V587/codex-rate/blob/main/docs/windows11-compatibility.md)
 
-从 [GitHub Releases](https://github.com/CrAyoN-V587/codex-rate/releases) 下载 Windows x64 便携 ZIP，解压后双击 `CodexRate.exe` 或 `Start-Codex-Rate.cmd`。也可直接下载单文件 EXE。无需另装 Python 或 .NET SDK。
+## 功能
 
-从源码首次运行需要 Python 和 Tk，先编译当前页读取器并构建 EXE：
+- **对话跟随**：识别当前选中的本地对话，切换加载期间显示 `--`。
+- **指标展示**：显示任务吞吐、输出 Token 及输入缓存命中率；双击查看完整数值和计算说明。
+- **窗口交互**：支持拖动定位、明暗主题、手动固定会话和托盘操作。
+- **后台等待**：Codex 未运行时保留托盘；检测到窗口后显示状态条。
+- **登录自启动**：可选的当前用户启动项，无需管理员权限。
 
-```powershell
-.\build.cmd
-python run.py
-```
+## 快速开始
 
-- 状态条跟随可见的 Codex 窗口；Codex 最小化或其他应用处于前台时隐藏，托盘仍可访问。
-- **拖动**调整相对位置，位置会保存；**双击**查看指标定义和完整数字；**右键／⋮**打开菜单。
-- 托盘图标左键打开详情，右键打开菜单；菜单可切主题、固定会话、选择最近会话、重置位置和退出。
-- 默认根据左侧对话的“当前页面”标记自动切换。切换加载、页面尚未识别时三项均显示 `--`，不会沿用上一段对话的数字，也不会选取后台最近活动会话代替。
-- `~` 表示本轮未结束，当前显示最近已完成响应边界的测量；不是每个 token 都实时更新。
-- 未运行 Codex 时只保留托盘，不显示等待条、不启动会话读取器；检测到 Codex 窗口后自动响应。Codex 关闭后停止读取，回到后台等待。
+### 运行要求
 
-## 开机自启动
-
-三点菜单可选择“启用开机自启动”或“关闭开机自启动”。首次下载不会自动注册；更新同一路径下的 EXE 会沿用已有设置，不必重复注册。
-
-自启动仅在当前用户登录时运行，使用 `HKCU/Software/Microsoft/Windows/CurrentVersion/Run` 下的 `CodexRate` 值，命令为带双引号的永久 EXE 路径加 `--background`。不需要管理员权限、不创建服务或计划任务。登录时静默保留托盘，Codex 窗口出现后自动显示。
-
-```powershell
-# 也可直接通过 EXE 管理
-.\dist\CodexRate.exe --install-startup
-.\dist\CodexRate.exe --uninstall-startup
-```
-
-“退出 Codex Rate”只退出本次运行；关闭自启动需用菜单或上面的卸载启动项参数。移动或删除 EXE 后，需重新启用自启动以更新路径。诊断时 `--background` 可直接验证后台启动方式；重复后台启动不会弹出已运行提示。
-
-更多启动方式如下。界面参数也可传给 EXE；JSON 快照使用源码命令：
-
-```powershell
-# 独立窗口，方便看清布局；仍读取真实数据
-python run.py --preview
-
-# 可选：手动固定会话；右键菜单可恢复自动跟随
-python run.py --thread YOUR-CONVERSATION-UUID
-
-# 只读 JSON 快照，适合排障
-python run.py --snapshot --thread YOUR-CONVERSATION-UUID
-
-# 明确标注“演示”的合成界面，不产生模型请求
-python run.py --demo --preview
-```
-
-默认读取 `CODEX_HOME`；未设置时读取用户主目录下的 `.codex`。`--home` 可指定其他 Codex home。主题与位置保存在 `%LOCALAPPDATA%/CodexRate/settings.json`；可退出后删除此文件来重置。手动固定只在本次运行有效。
-
-## 指标合同
-
-| 指标 | 定义 |
+| 项目 | 要求 |
 | --- | --- |
-| 本轮输出 | 官方 `output_tokens`，含推理 token，也含生成工具参数的 token。不是屏幕可见文字量。 |
-| 缓存命中率 | 本轮 `cached_input_tokens / input_tokens`。缓存是输入的子集，不额外相加。零输入显示 `--`。 |
-| 有效 TPS | 本轮输出 token ÷ 从 `task_started` 到最近已完成响应的有效耗时。 |
+| 目标平台 | Windows 11 x64，Intel／AMD 处理器 |
+| Codex 客户端 | 本地 MSIX 安装的 Windows 客户端，包身份为 `OpenAI.Codex_*` |
+| 系统组件 | .NET Framework 4.x 和 Windows UI Automation |
+| Python／.NET SDK | 运行发布包不需要；EXE 已内置 Python、Tk 和当前页识别程序 |
 
-有效耗时先取该时间窗口，再扣除已记录的工具**独占**时间。工具区间先取并集；工具与明确模型活动重叠的部分保留。首 token 等待、队列延迟和日志记录延迟包含在内，因此**不是服务端纯解码 TPS**。本轮结束后保留最终值。
+当前已验证的组合为 Windows 11 build 26200 x64 与 Codex 26.1013.4894.0。其他系统版本、安装方式和架构的状态见[兼容性说明](https://github.com/CrAyoN-V587/codex-rate/blob/main/docs/windows11-compatibility.md)。
 
-只用 Reasoning／AgentMessage 的时间作分母会遗漏部分工具参数的生成耗时，本机已观测到这种情况，所以首版使用统一的有效 TPS 口径，不混用两种速度。
+### 下载与启动
 
-- 新格式以 `token_usage_record` 的 `response_id` 去重，不叠加滞后的旧 `token_count`。
-- 本轮官方累计值与响应总和核对；旧格式把整个 thread 累计值复制到 `turn_token_usage` 的情况不直接采信。
-- 首次只读取日志末尾 4 MiB，之后增量读取。缺失本轮开头时 TPS 为 `--`；输出／缓存仅在有可信本轮累计值时显示。
-- 取消、用量矛盾、无有效时间或小于 0.5 秒的时间窗口不显示 TPS。
-- 半行留待后续写完；坏行使当前轮不可用，下一完整轮可以恢复。
+1. 从 [GitHub Releases](https://github.com/CrAyoN-V587/codex-rate/releases) 下载 Windows x64 便携 ZIP，或单文件 `CodexRate.exe`。
+2. 将文件放入固定目录。使用 ZIP 时，先完整解压。
+3. 双击 `CodexRate.exe`；便携包也可通过 `Start-Codex-Rate.cmd` 启动。
+4. 打开 Codex 并选中一个本地对话，等待指标加载。
 
-## 范围和限制
+Codex 未打开时，程序在托盘等待。Codex 最小化或其他应用处于前台时，状态条通常隐藏；菜单、详情或拖动操作期间保持可见。Codex 关闭后，程序停止会话读取并返回等待状态。
 
-其他 Windows 11 电脑的条件、当前证据和后续适配优先级见 [Windows 11 兼容性评估](docs/windows11-compatibility.md)。当前下载包为 x64；ARM64、各档缩放和混合 DPI 不能视为已验收。
+### 常用操作
 
-- 首版支持 Windows 10/11 x64、本地 Codex MSIX 包 `OpenAI.Codex_*`；当前实际运行验证为 Windows 11＋Codex 26.1013.4894.0。
-- 悬浮位置以宿主窗口底部偏移定位，可拖动调整；未使用输入框 UI Automation 锚点，无法保证不同布局自动贴合工具栏。
-- 当前页识别只读取 Windows UI Automation 的 `current=page` 导航名称，并在本地 `threads.name` 中精确、唯一匹配；不使用原始首条提示词作为显示名称。匹配不唯一、侧栏没有可见选中项或读取中断时显示 `--`。
-- **多个 Codex 窗口、远程会话、普通 ChatGPT 聊天不在本版验收范围。** 无障碍名称不是 UUID，远程或其他页面若与某一本地会话完全同名，无法仅凭此接口严格区分。仅验收左侧切换本地对话的行为。
-- IPC 跟随集合不再充当当前页来源；自动跟随也不再回退为“最近”活动。
-- 日志中未提供的逐 token 时间无法恢复，不伪造实时流速。计时受客户端负载、日志延迟和系统时钟变化影响。
-- 负坐标通过原生 `SetWindowPos` 处理；尚未进行真实双屏／不同 DPI 显示器之间的拖动实测。
+| 操作 | 结果 |
+| --- | --- |
+| 拖动状态条 | 调整相对位置并保存 |
+| 双击状态条 | 打开指标详情 |
+| 右键或点击 `⋮` | 打开菜单，切换主题、固定会话、重置位置或退出 |
+| 托盘图标左键 | 打开详情 |
+| 托盘图标右键 | 打开菜单 |
+
+手动固定会话仅对本次运行有效，可在菜单中恢复自动跟随。
+
+## 登录自启动
+
+在菜单中选择“启用开机自启动”后，程序会在当前 Windows 用户登录时后台运行。首次下载不会自动注册启动项。
+
+启动项使用 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 下的 `CodexRate` 值，指向当前 EXE 的固定路径并附加 `--background` 参数。它不创建系统服务或计划任务。
+
+也可在 EXE 所在目录执行：
+
+```powershell
+.\CodexRate.exe --install-startup
+.\CodexRate.exe --uninstall-startup
+```
+
+“退出 Codex Rate”只结束本次运行。要取消后续登录启动，请使用“关闭开机自启动”或上述卸载启动项命令。移动 EXE 后，需要重新启用自启动以更新路径。
+
+## 指标说明
+
+本轮统计以 Codex 日志中的任务轮次为单位，一轮可能包含多次模型响应和工具调用。
+
+| 指标 | 计算口径 |
+| --- | --- |
+| 有效 TPS | 本轮已记录的输出 Token 总量 ÷ 有效耗时，单位为 `tok/s` |
+| 本轮输出 | Codex 会话日志记录的 `output_tokens`，包含推理输出和工具参数 |
+| 缓存命中率 | 本轮 `cached_input_tokens / input_tokens`；缓存属于输入的子集 |
+
+有效耗时从本轮开始计至最近一次已完成的模型响应，再扣除日志记录的工具独占时间。重叠工具区间按并集计算；工具与明确模型活动重叠的部分保留。
+
+该指标反映客户端观测到的任务吞吐，包含首 Token 等待、排队和日志记录延迟，**不等同于服务端纯解码速度**。数据在模型响应完成后更新，不按单个 Token 实时刷新。
+
+- `~` 表示本轮仍在进行，显示的是最近一次已完成响应后的测量值。
+- `--` 表示该项指标无法计算或尚未就绪。切换对话、无法识别选中页或加载数据时，三项指标均显示 `--`。
+- 缺失本轮起点、任务取消、计时不足 0.5 秒或数据不一致时，不显示有效 TPS。
+- 缺失本轮起点时，输出量和缓存比例仅在存在可信本轮累计值时显示。
+
+读取器优先处理新格式 `token_usage_record`，按响应 ID 去重；旧格式 `token_count` 用于兼容读取，不与新格式叠加。启动时读取日志末尾 4 MiB，之后增量读取。未完成的行等待后续写入；损坏行使当前轮数据不可用，下一完整轮可恢复。
+
+## 数据与配置
+
+程序读取本地会话元数据、Token 计数和时间信息，不持久化或展示对话正文，不向外部服务发送会话数据。程序不要求 API Key，不代理模型请求，不修改 Codex 的安装文件、认证、配置或会话日志。
+
+| 配置 | 位置或行为 |
+| --- | --- |
+| Codex 数据目录 | 优先使用 `--home`，其次为 `CODEX_HOME`，默认是用户主目录下的 `.codex` |
+| 状态条设置 | `%LOCALAPPDATA%\CodexRate\settings.json`，保存主题和位置 |
+| 登录启动项 | 当前用户的 HKCU Run 注册表项，仅在主动启用时写入 |
+
+退出程序后删除状态条设置文件，可恢复默认主题和位置。该操作不影响 Codex 数据。
+
+## 已知限制
+
+- 自动跟随依赖可见导航项的名称与本地会话显示名称的唯一匹配。侧栏隐藏、名称重复、数据库结构变化或客户端界面改版可能导致识别失败。
+- 远程会话、普通 ChatGPT 聊天和完整多窗口行为不在当前验证范围。其他页面与本地会话同名时，仅凭导航名称无法可靠区分。
+- 状态条按窗口底部偏移定位，可手动调整；不同布局下可能无法自动贴合输入框工具栏。
+- ARM64、各档缩放、混合 DPI、多显示器和真实 Windows 登录触发尚未完成运行验证。
+- 发布的 EXE 未签名，不提供自动更新。下载或运行可能受到系统与组织应用策略限制。
+
+详细环境条件和后续适配计划见 [Windows 11 兼容性说明](https://github.com/CrAyoN-V587/codex-rate/blob/main/docs/windows11-compatibility.md)。
 
 ## 开发与构建
 
-实际工具链：Python 3.12.7、Tk 8.6、PyInstaller 6.22.3。考虑过 Python 3.14，但本机已有的 3.12 已满足标准库需求，首版没有安装新的语言运行时。
+已使用的构建环境：Python 3.12.7、Tk 8.6、PyInstaller 6.22.3，以及 Windows 自带的 .NET Framework C# 编译器。
 
-v0.3.1 发布验证：70 条回归、编译和独立审阅通过；便携 ZIP 从带空格路径启动后读取真实指标，退出无残留。此前真实左侧 A→B→A 切换、三点菜单主题与退出也已验证。真实 Windows 重启／重登录和双屏／混合 DPI 尚未实测。
+在仓库根目录执行：
 
 ```powershell
+# 测试与编译检查
 python -m unittest discover -s tests -v
-python -m compileall -q codex_rate run.py
+python -m compileall -q codex_rate run.py package_release.py
+
+# 编译当前页识别程序并构建单文件 EXE
 .\build.cmd
+
+# 从源码运行；首次运行前需完成上述构建
+python run.py
+
+# 基于已构建的 EXE 创建便携 ZIP
+python package_release.py
 ```
 
-Python 运行时没有第三方依赖。当前页面读取器使用 Windows 自带的 .NET Framework 4.x／UI Automation，不需要 .NET SDK；`build.cmd` 会先编译 `native/ActiveConversation.cs`，再将它打入单文件 EXE。源码启动自动跟随前也需要先构建这个 helper。`build.cmd` 仅在项目 `.venv` 安装 Python 打包依赖。
+Python 应用代码仅使用标准库。`build.cmd` 将 Python 打包依赖安装到项目 `.venv`，输出 EXE 至 `dist/`；中间文件保存在 `build/`。这些生成目录不纳入版本控制。
 
-创建便携发布包：`python package_release.py`。打包时保留 `licenses/` 与 `THIRD_PARTY_NOTICES.md`；具体分发内容和验证边界见 `RELEASE_NOTES.md`。
+源码运行时可使用以下参数：
 
-构建输出到 `dist/`，中间文件在 `build/`。这三个目录都不提交 Git；退出程序后可手动删除来清理。
+```powershell
+python run.py --preview                         # 独立窗口，读取真实数据
+python run.py --demo --preview                  # 标有“演示”的合成数据
+python run.py --thread YOUR-CONVERSATION-UUID    # 固定会话
+python run.py --snapshot --thread YOUR-CONVERSATION-UUID
+```
 
-源码职责：`metrics.py` 计量、`reader.py` 增量读日志、`active.py`／`native/ActiveConversation.cs` 当前对话识别、`ipc.py` 跟随流元数据、`windows.py` Win32／托盘、`app.py` 界面与生命周期。
+`--snapshot` 输出 JSON，建议通过源码命令使用；无控制台的发布 EXE 不适合作为终端输出入口。`--home` 可指定 Codex 数据目录，`--settings` 可指定状态条设置文件。
 
-## 参考
+## 验证状态
 
-- [codex-statusbar](https://github.com/dongyue-19/codex-statusbar)：悬浮条形式、Windows 宿主身份和 IPC 协议调查。
-- [CC Switch](https://github.com/farion1231/cc-switch)：区分首 token 延迟与输出吞吐的展示方式。
-- [CodexBar](https://github.com/steipete/CodexBar)：本轮性能与用量的口径区分。
-- [Tokscale](https://github.com/junhoyeo/tokscale)：模型／日期维度统计的参考。
+v0.3.1 已通过 70 条自动化测试、Python 编译检查和代码审查。自动化测试包含对系统接口的模拟，覆盖指标计算、增量读取、会话切换、后台生命周期、启动项管理和菜单异常处理。
 
-本项目为独立实现，未打包或执行上述参考项目的代码。运行时来源与许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。当前未为原创代码另行声明开源许可证。
+已有运行验证包括本地对话 A→B→A 切换、菜单主题切换与退出、带空格路径下的便携包启动、真实会话数据读取及退出后的进程清理。完整记录见 [PROJECT.md](https://github.com/CrAyoN-V587/codex-rate/blob/main/PROJECT.md)；这些结果不替代其他电脑、真实登录和多屏环境的验证。
+
+## 设计参考与许可
+
+设计与技术资料参考了 [codex-statusbar](https://github.com/dongyue-19/codex-statusbar)、[CC Switch](https://github.com/farion1231/cc-switch)、[CodexBar](https://github.com/steipete/CodexBar) 和 [Tokscale](https://github.com/junhoyeo/tokscale)。它们不作为本项目的程序依赖分发。
+
+打包运行时的来源和许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [licenses/](licenses/)。项目当前尚未为原创代码声明开源许可证。
