@@ -5,7 +5,7 @@
 ## 30 秒上下文
 
 目标：在 Windows Codex 窗口旁显示 TPS、本轮输出 token、缓存命中率。
-当前阶段：独立审查、70 条回归、便携 EXE 运行和 GitHub 推送完成；下一步：下次真实登录时确认自启动体验。
+当前阶段：v0.3.1 已发布，仓库转公开；已完成其他 Windows 11 电脑的兼容性评估。下一步：优先设计环境诊断，再做跨机／缩放／真实登录验收。
 
 ## 范围和验收
 
@@ -38,9 +38,16 @@
 
 ## 当前状态
 
-源码远程：[CrAyoN-V587/codex-rate](https://github.com/CrAyoN-V587/codex-rate)，当前为私有。构建制品位于 `dist/CodexRate.exe` 与 `dist/CodexRate-v0.3.1-windows-x64.zip`，不纳入 Git，由 Release 分发。
+源码远程：[CrAyoN-V587/codex-rate](https://github.com/CrAyoN-V587/codex-rate)，当前为公开。构建制品位于 `dist/CodexRate.exe` 与 `dist/CodexRate-v0.3.1-windows-x64.zip`，不纳入 Git，由 Release 分发。
 
 发布入口：[v0.3.1 Windows x64 预发布](https://github.com/CrAyoN-V587/codex-rate/releases/tag/v0.3.1)。源码 main 与注释标签 v0.3.1 已推送，Release 提供单文件 EXE 和便携 ZIP。第三方许可保留原始空格，应用代码与文档差异检查通过。
+
+## 公开与 Windows 11 适配评估（2026-10-17）
+
+- 按用户明确要求转为 PUBLIC；GitHub CLI 和未带认证的仓库 API 均确认公开。
+- 当前 EXE 检查为 AMD64；当前实测主机 Windows build 26200。没有新增其他电脑的实测证据，不把静态评估说成跨机验收。
+- 新增 `docs/windows11-compatibility.md`，覆盖运行时、MSIX 识别、数据目录、权限、路径、DPI、多屏、登录自启动、ARM64 和最小跨机验收。
+- 本轮仅评估适配与更新说明，没有修改程序行为或重发 EXE；v0.3.1 运行证据仍适用。原创代码许可状态保持不变。
 
 ## 0.3.1 发布验收（2026-10-17）
 

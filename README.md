@@ -74,6 +74,8 @@ python run.py --demo --preview
 
 ## 范围和限制
 
+其他 Windows 11 电脑的条件、当前证据和后续适配优先级见 [Windows 11 兼容性评估](docs/windows11-compatibility.md)。当前下载包为 x64；ARM64、各档缩放和混合 DPI 不能视为已验收。
+
 - 首版支持 Windows 10/11 x64、本地 Codex MSIX 包 `OpenAI.Codex_*`；当前实际运行验证为 Windows 11＋Codex 26.1013.4894.0。
 - 悬浮位置以宿主窗口底部偏移定位，可拖动调整；未使用输入框 UI Automation 锚点，无法保证不同布局自动贴合工具栏。
 - 当前页识别只读取 Windows UI Automation 的 `current=page` 导航名称，并在本地 `threads.name` 中精确、唯一匹配；不使用原始首条提示词作为显示名称。匹配不唯一、侧栏没有可见选中项或读取中断时显示 `--`。
