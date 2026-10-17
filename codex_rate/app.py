@@ -1,0 +1,432 @@
+import argparse
+import json
+import os
+import threading
+import time
+from pathlib import Path
+
+from .ipc import IpcWatcher
+from .metrics import Meter, compact
+from .reader import SessionIndex, SessionReader, codex_home
+
+
+class Monitor:
+    def __init__(self, home, thread_id=None):
+        self.index = SessionIndex(home)
+        self.ipc = IpcWatcher()
+        self.pinned = thread_id
+        self.stop = threading.Event()
+        self.lock = threading.Lock()
+        self.readers = {}
+        self.missing_target = None
+        self.value = {"mode": "starting", "thread": None,
+                      "measurement": Meter().snapshot().to_dict(), "error": None}
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.ipc.start()
+        self.thread.start()
+
+    def update(self):
+        self.index.refresh()
+        selected, connected, ipc_error = self.ipc.selection.snapshot()
+        candidates = self.ipc.selection.local_threads()
+        with self.lock:
+            pinned = self.pinned
+        target = pinned or selected
+        mode = ("pinned" if pinned else "remote" if ipc_error == "remote-session-unsupported"
+                else "ipc" if selected else "recent")
+        path = (None if mode == "remote" else self.index.find(target) if target
+                else self.index.latest_desktop(candidates))
+        if target and path is None and mode != "remote" and self.missing_target != target:
+            self.index.refresh(force=True)
+            path = self.index.find(target)
+        self.missing_target = target if path is None else None
+        error = "remote-session-unsupported" if mode == "remote" else self.index.error
+        if path:
+            reader = self.readers.get(path)
+            if reader is None:
+                if len(self.readers) >= 8:
+                    self.readers.pop(next(iter(self.readers)))
+                reader = self.readers[path] = SessionReader(path)
+            measurement = reader.poll().to_dict()
+            error = reader.error or ("malformed-jsonl" if "malformed-jsonl" in measurement["warnings"] else error)
+            thread_id = target or next((t for t in candidates if t in path.stem), path.stem[-36:])
+        else:
+            measurement = Meter().snapshot().to_dict()
+            thread_id = target
+            error = error or ("selected-log-unavailable" if target else "no-session")
+        value = {"mode": mode, "thread": thread_id, "measurement": measurement,
+                 "error": error, "ipc_connected": connected, "ipc_error": ipc_error}
+        with self.lock:
+            self.value = value
+        return value
+
+    def _run(self):
+        while not self.stop.is_set():
+            try:
+                self.update()
+            except Exception as exc:
+                with self.lock:
+                    self.value = dict(self.value, error=type(exc).__name__)
+            self.stop.wait(0.5)
+
+    def snapshot(self):
+        with self.lock:
+            return dict(self.value)
+
+    def pin(self, thread_id):
+        with self.lock:
+            self.pinned = thread_id
+
+    def close(self):
+        self.stop.set()
+        self.ipc.stop.set()
+        self.thread.join(timeout=2)
+
+
+def load_settings(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return {}
+        return {k: v for k, v in value.items() if
+                (k == "theme" and v in ("dark", "light")) or
+                (k in ("right", "bottom") and type(v) is int and 0 <= v <= 4000)}
+    except (OSError, ValueError):
+        return {}
+
+
+class Strip:
+    def __init__(self, args, native):
+        import tkinter as tk
+        from .windows import Tray
+
+        self.tk, self.native, self.args = tk, native, args
+        self.settings_path = args.settings
+        self.settings = {"theme": "dark", "right": 26, "bottom": 66}
+        self.settings.update(load_settings(self.settings_path))
+        self.root = tk.Tk()
+        self.root.title("Codex Rate")
+        self.root.overrideredirect(not args.preview)
+        self.root.attributes("-topmost", True)
+        self.root.geometry("+100+100")
+        self.frame = tk.Frame(self.root, bd=1, relief="solid")
+        self.frame.pack(fill="both", expand=True)
+        self.status = tk.Label(self.frame, text="●", font=("Segoe UI", 10), padx=9)
+        self.status.pack(side="left")
+        self.fields = []
+        for label, initial in (("有效TPS", "-- tok/s"), ("本轮输出", "--"), ("缓存", "--")):
+            group = tk.Frame(self.frame)
+            group.pack(side="left", padx=(0, 15), pady=7)
+            caption = tk.Label(group, text=label, font=("Microsoft YaHei UI", 9))
+            caption.pack(side="left", padx=(0, 6))
+            value = tk.Label(group, text=initial, font=("Segoe UI Semibold", 11))
+            value.pack(side="left")
+            self.fields.append(value)
+        self.menu_button = tk.Label(self.frame, text="⋮", font=("Segoe UI", 13), padx=8)
+        self.menu_button.pack(side="left", fill="y")
+        self.detail = None
+        self.detail_text = None
+        self.closed = False
+        self.tick_handle = None
+        self.exit_handle = None
+        self.drag = None
+        self.dragged = False
+        self.host_rect = None
+        self.force_show_until = 0.0
+        self.paint()
+        self.root.update_idletasks()
+        self.hwnd = (native.user.GetAncestor(self.root.winfo_id(), 2)
+                     if args.preview else native.tool_window(self.root))
+        self.monitor = Monitor(args.home, args.thread)
+        if not args.demo:
+            self.monitor.start()
+        self.tray = Tray(native)
+        self.tray.start()
+        self.bind_children(self.frame)
+        self.menu_button.bind("<Button-1>", self.popup)
+        self.root.bind("<Escape>", lambda _: self.hide_details())
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        if args.exit_after:
+            self.exit_handle = self.root.after(int(args.exit_after * 1000), self.close)
+        self.tick()
+
+    def bind_children(self, widget):
+        widget.bind("<ButtonPress-1>", self.drag_start)
+        widget.bind("<B1-Motion>", self.drag_move)
+        widget.bind("<ButtonRelease-1>", self.drag_end)
+        widget.bind("<Button-3>", self.popup)
+        widget.bind("<Double-Button-1>", lambda _: self.show_details())
+        for child in widget.winfo_children():
+            self.bind_children(child)
+
+    def paint(self):
+        dark = self.settings["theme"] == "dark"
+        self.bg = "#181d27" if dark else "#f5f7fa"
+        self.fg = "#edf2f9" if dark else "#172136"
+        self.muted = "#9aa9bd" if dark else "#52657d"
+        self.accent = "#62d8d3" if dark else "#087d78"
+
+        def color(widget):
+            widget.configure(bg=self.bg)
+            if isinstance(widget, self.tk.Label):
+                widget.configure(fg=self.muted)
+            for child in widget.winfo_children():
+                color(child)
+
+        color(self.frame)
+        self.frame.configure(highlightbackground="#344052" if dark else "#c8d2e0")
+        for index, field in enumerate(self.fields):
+            field.configure(fg=self.accent if index == 0 else self.fg)
+        self.status.configure(fg=self.accent)
+        if self.detail and self.detail.winfo_exists():
+            self.detail.configure(bg=self.bg)
+            self.detail_text.configure(bg=self.bg, fg=self.fg)
+
+    def data(self):
+        if self.args.demo:
+            return {"mode": "demo", "thread": "demo-only", "error": None,
+                    "ipc_connected": False, "ipc_error": None,
+                    "measurement": {"tps": 128.4, "output": 3248, "input": 24000,
+                                    "cached": 21600, "cache_percent": 90.0,
+                                    "state": "completed", "elapsed_ms": 25296,
+                                    "carrier": "synthetic", "samples": 4,
+                                    "complete_start": True, "warnings": []}}
+        return self.monitor.snapshot()
+
+    def tick(self):
+        if self.closed:
+            return
+        value = self.data()
+        m = value["measurement"]
+        unavailable = bool(value["error"])
+        tps = m["tps"] if not unavailable else None
+        marker = "~" if m["state"] == "active" else ""
+        self.fields[0].configure(text=f"{marker}{tps:.1f} tok/s" if tps is not None else "-- tok/s")
+        self.fields[1].configure(text=compact(m["output"]) if not unavailable else "--")
+        cache = m["cache_percent"] if not unavailable else None
+        self.fields[2].configure(text=f"{cache:.0f}%" if cache is not None else "--")
+        self.status.configure(text="演示" if self.args.demo else "最近" if value["mode"] == "recent" else "●",
+            fg="#e9b86e" if unavailable or value["mode"] == "recent" else self.accent)
+        self.root.update_idletasks()
+        _, rect, visible = self.native.host()
+        self.host_rect = rect
+        force_show = time.monotonic() < self.force_show_until
+        if self.args.demo or self.args.preview or force_show:
+            self.root.deiconify()
+        elif rect and visible:
+            self.root.deiconify()
+            if not self.drag:
+                width, height = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+                x = max(rect[0] + 8, rect[2] - width - self.settings["right"])
+                y = max(rect[1] + 8, rect[3] - height - self.settings["bottom"])
+                self.native.place(self.root, x, y)
+        elif rect:
+            self.root.withdraw()
+        else:
+            # Keep a discoverable waiting strip until Codex is started.
+            self.root.deiconify()
+        if self.detail and self.detail.winfo_exists():
+            self.detail_text.configure(text=self.describe(value))
+        while not self.tray.events.empty():
+            action = self.tray.events.get()
+            self.force_show_until = time.monotonic() + 3
+            self.root.deiconify()
+            self.native.user.SetForegroundWindow(self.hwnd)
+            if action == "details":
+                self.show_details()
+            else:
+                self.popup()
+        if not self.closed:
+            self.tick_handle = self.root.after(400, self.tick)
+
+    def describe(self, value):
+        m = value["measurement"]
+        names = {"ipc": "IPC 跟随会话", "pinned": "手动固定会话",
+                 "recent": "最近活动 · 降级模式", "remote": "远程会话 · 暂不支持",
+                 "starting": "正在连接", "demo": "演示数据"}
+        states = {"idle": "等待数据", "waiting": "等待本轮首个响应",
+                  "active": "本轮进行中 · 响应结束后刷新", "completed": "本轮完成",
+                  "aborted": "本轮已取消 · 不显示 TPS"}
+        number = lambda n: "--" if n is None else f"{n:,}"
+        lines = ["CODEX RATE  /  0.1.0", "",
+                 names[value["mode"]], f"会话：{value['thread'] or '--'}",
+                 states.get(m["state"], m["state"]), "",
+                 f"本轮输出：{number(m['output'])} token（含推理）",
+                 f"本轮输入：{number(m['input'])} token",
+                 f"缓存输入：{number(m['cached'])} token（输入的子集）",
+                 f"有效计时：{m['elapsed_ms'] / 1000:.3f} 秒" if m['elapsed_ms'] is not None else "有效计时：--",
+                 f"已记录响应：{m['samples']}  ·  来源：{m['carrier']}", "",
+                 "有效TPS = 本轮输出 / 扣除已知工具独占时间的耗时",
+                 "含首 token 等待与队列延迟；响应完成后刷新。",
+                 "含生成工具参数的时间，不是纯解码速度。",
+                 "~ 表示本轮尚未结束，保留最近一次测量。",
+                 "缓存命中率 = 本轮缓存输入 / 本轮输入。",
+                 "左键拖动位置 · 双击详情 · 右键菜单"]
+        issues = list(m["warnings"])
+        if value["error"]:
+            issues.append(value["error"])
+        if value.get("ipc_error"):
+            issues.append(value["ipc_error"])
+        if self.tray.error:
+            issues.append("tray-unavailable")
+        if issues:
+            lines += ["", "数据状态：" + ", ".join(issues)]
+        return "\n".join(lines)
+
+    def show_details(self):
+        if self.detail and self.detail.winfo_exists():
+            self.detail.lift()
+            return
+        self.detail = self.tk.Toplevel(self.root)
+        self.detail.title("Codex Rate · 指标详情")
+        self.detail.protocol("WM_DELETE_WINDOW", self.hide_details)
+        self.detail.attributes("-topmost", True)
+        self.detail.resizable(False, False)
+        self.detail_text = self.tk.Label(self.detail, justify="left", anchor="w",
+            font=("Microsoft YaHei UI", 10), padx=22, pady=18,
+            text=self.describe(self.data()))
+        self.detail_text.pack()
+        self.detail.update_idletasks()
+        height = self.detail.winfo_reqheight() + 40
+        y = self.root.winfo_y() - height - 12
+        if y < 0:
+            y = self.root.winfo_y() + self.root.winfo_height() + 12
+        self.native.place(self.detail, self.root.winfo_x(), y)
+        self.detail.bind("<Escape>", lambda _: self.hide_details())
+        self.paint()
+
+    def hide_details(self):
+        if self.detail and self.detail.winfo_exists():
+            self.detail.destroy()
+        self.detail = None
+
+    def popup(self, event=None):
+        menu = self.tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="指标详情", command=self.show_details)
+        menu.add_separator()
+        menu.add_command(label="自动跟随会话", command=lambda: self.monitor.pin(None))
+        thread_id = self.data()["thread"]
+        menu.add_command(label="固定到此会话", state="normal" if thread_id else "disabled",
+                         command=lambda: self.monitor.pin(thread_id))
+        recent = self.tk.Menu(menu, tearoff=False)
+        for path in self.monitor.index.paths[:8]:
+            candidate = path.stem[-36:]
+            recent.add_command(label=candidate[:8] + "…" + candidate[-6:],
+                               command=lambda t=candidate: self.monitor.pin(t))
+        menu.add_cascade(label="选择最近会话", menu=recent)
+        menu.add_separator()
+        menu.add_command(label="切换明暗主题", command=self.toggle_theme)
+        menu.add_command(label="重置位置", command=self.reset_position)
+        menu.add_separator()
+        menu.add_command(label="退出 Codex Rate", command=self.close)
+        x = event.x_root if event else self.root.winfo_pointerx()
+        y = event.y_root if event else self.root.winfo_pointery()
+        try:
+            menu.tk_popup(x, y)
+        except self.tk.TclError:
+            if not self.closed:
+                raise
+        finally:
+            if not self.closed:
+                menu.grab_release()
+                menu.destroy()
+
+    def toggle_theme(self):
+        self.settings["theme"] = "light" if self.settings["theme"] == "dark" else "dark"
+        self.paint()
+        self.save()
+
+    def reset_position(self):
+        self.settings.update(right=26, bottom=66)
+        self.save()
+
+    def drag_start(self, event):
+        self.drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
+        self.dragged = False
+
+    def drag_move(self, event):
+        if self.drag:
+            self.dragged = True
+            self.native.place(self.root, event.x_root-self.drag[0], event.y_root-self.drag[1])
+
+    def drag_end(self, _):
+        if self.dragged and self.host_rect:
+            self.settings["right"] = max(0, self.host_rect[2] - self.root.winfo_x() - self.root.winfo_width())
+            self.settings["bottom"] = max(0, self.host_rect[3] - self.root.winfo_y() - self.root.winfo_height())
+            self.save()
+        self.drag = None
+
+    def save(self):
+        from tkinter import messagebox
+        try:
+            self.settings_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.settings_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.settings, indent=2), encoding="utf-8")
+            temporary.replace(self.settings_path)
+        except OSError as exc:
+            messagebox.showerror("Codex Rate", f"设置保存失败：{type(exc).__name__}", parent=self.root)
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        for handle in (self.tick_handle, self.exit_handle):
+            if handle:
+                self.root.after_cancel(handle)
+        if not self.args.demo:
+            self.monitor.close()
+        self.tray.close()
+        if self.args.diagnostics:
+            value = self.data()
+            value["gui"] = {"width": self.root.winfo_width(), "height": self.root.winfo_height(),
+                            "tray_available": self.tray.error is None,
+                            "host_detected": self.host_rect is not None}
+            self.args.diagnostics.parent.mkdir(parents=True, exist_ok=True)
+            self.args.diagnostics.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.root.destroy()
+        self.native.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Codex Rate — local Windows throughput strip")
+    parser.add_argument("--home", type=Path, default=codex_home(), help="Codex home directory")
+    parser.add_argument("--thread", help="Pin an exact conversation UUID")
+    parser.add_argument("--snapshot", action="store_true", help="Read-only numeric JSON snapshot")
+    parser.add_argument("--demo", action="store_true", help="Clearly labelled synthetic UI preview")
+    parser.add_argument("--preview", action="store_true", help="Show as an independent titled window")
+    parser.add_argument("--exit-after", type=float, help="Close after N seconds (GUI smoke checks)")
+    parser.add_argument("--diagnostics", type=Path, help="Write numeric-only state on GUI exit")
+    parser.add_argument("--settings", type=Path, default=Path(os.environ.get("LOCALAPPDATA", Path.home())) / "CodexRate" / "settings.json")
+    args = parser.parse_args()
+    if args.thread:
+        import uuid
+        try:
+            uuid.UUID(args.thread)
+        except ValueError:
+            parser.error("--thread requires a conversation UUID")
+    if args.snapshot:
+        monitor = Monitor(args.home, args.thread)
+        monitor.ipc.start()
+        try:
+            for _ in range(10):
+                if monitor.ipc.selection.snapshot()[0] or args.thread:
+                    break
+                time.sleep(0.1)
+            print(json.dumps(monitor.update(), ensure_ascii=False, indent=2))
+        finally:
+            monitor.ipc.stop.set()
+        return
+    if os.name != "nt":
+        parser.error("The strip requires Windows 10/11; --snapshot can run elsewhere.")
+    from .windows import Native
+    from tkinter import messagebox
+    native = Native()
+    native.dpi()
+    if not native.single_instance("-demo" if args.demo else ""):
+        messagebox.showinfo("Codex Rate", "状态条已在运行。请使用托盘图标查看详情或退出。")
+        native.close()
+        return
+    strip = Strip(args, native)
+    strip.root.mainloop()
