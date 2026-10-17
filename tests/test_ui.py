@@ -130,6 +130,28 @@ class StripTests(unittest.TestCase):
         strip.menu.invoke("关闭开机自启动")
         strip.startup.disable.assert_called_once()
 
+    def test_tray_startup_query_error_keeps_exit_and_next_tick_available(self):
+        strip = self.strip
+        strip.close = Mock()
+        for error in (PermissionError("denied"), OSError("registry unavailable")):
+            with self.subTest(error=type(error).__name__):
+                strip.startup.is_enabled.side_effect = error
+                strip.tray.events.put("menu")
+                strip.root.after.reset_mock()
+                strip.tick()
+                self.assertTrue(strip.menu_open)
+                self.assertEqual(strip.menu.entries["自启动状态不可用"]["state"], "disabled")
+                strip.menu.invoke("自启动状态不可用")
+                strip.startup.enable.assert_not_called()
+                strip.startup.disable.assert_not_called()
+                strip.menu.invoke("指标详情")
+                strip.menu.invoke("退出 Codex Rate")
+                strip.root.after.assert_called_once_with(400, strip.tick)
+                self.assertIs(strip.tick_handle, strip.root.after.return_value)
+                strip.check_menu()
+        self.assertEqual(strip.show_details.call_count, 2)
+        self.assertEqual(strip.close.call_count, 2)
+
     def test_background_waits_without_starting_readers_then_attaches(self):
         strip = self.strip
         strip.monitor_running = False

@@ -331,7 +331,7 @@ class Strip:
                   "active": "本轮进行中 · 响应结束后刷新", "completed": "本轮完成",
                   "aborted": "本轮已取消 · 不显示 TPS"}
         number = lambda n: "--" if n is None else f"{n:,}"
-        lines = ["CODEX RATE  /  0.3.0", "",
+        lines = ["CODEX RATE  /  0.3.1", "",
                  names[value["mode"]], f"会话：{value['thread'] or '--'}",
                  states.get(m["state"], m["state"]), "",
                  f"本轮输出：{number(m['output'])} token（含推理）",
@@ -409,8 +409,13 @@ class Strip:
         menu.add_separator()
         menu.add_command(label="切换明暗主题", command=self.toggle_theme)
         menu.add_command(label="重置位置", command=self.reset_position)
-        menu.add_command(label="关闭开机自启动" if self.startup.is_enabled() else "启用开机自启动",
-                         command=self.toggle_startup)
+        try:
+            startup_enabled = self.startup.is_enabled()
+        except OSError:
+            menu.add_command(label="自启动状态不可用", state="disabled")
+        else:
+            menu.add_command(label="关闭开机自启动" if startup_enabled else "启用开机自启动",
+                             command=self.toggle_startup)
         menu.add_separator()
         menu.add_command(label="退出 Codex Rate", command=self.close)
         x = event.x_root if event else self.root.winfo_pointerx()

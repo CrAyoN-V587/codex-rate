@@ -11,5 +11,5 @@ if not exist "build" mkdir build
 set "framework=%WINDIR%\Microsoft.NET\Framework64\v4.0.30319"
 "%framework%\csc.exe" /nologo /out:build\ActiveConversation.exe /r:"%framework%\WPF\UIAutomationClient.dll" /r:"%framework%\WPF\UIAutomationTypes.dll" /r:"%framework%\WPF\WindowsBase.dll" /r:System.Web.Extensions.dll native\ActiveConversation.cs
 if errorlevel 1 exit /b 1
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed --name CodexRate --noupx --specpath build --add-binary "%~dp0build\ActiveConversation.exe:native" run.py
+".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed --name CodexRate --noupx --specpath build --add-binary "%~dp0build\ActiveConversation.exe:native" --add-data "%~dp0licenses:licenses" --add-data "%~dp0THIRD_PARTY_NOTICES.md:." run.py
 exit /b %errorlevel%

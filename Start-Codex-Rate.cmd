@@ -1,6 +1,10 @@
 @echo off
 setlocal
 cd /d "%~dp0"
+if exist "%~dp0CodexRate.exe" (
+    start "" "%~dp0CodexRate.exe"
+    exit /b
+)
 if exist "%~dp0dist\CodexRate.exe" (
     start "" "%~dp0dist\CodexRate.exe"
     exit /b

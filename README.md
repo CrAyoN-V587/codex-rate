@@ -1,14 +1,17 @@
 # Codex Rate
 
-Windows 上只读的 Codex 桌面悬浮状态条：**有效 TPS · 本轮输出 · 缓存命中率**。0.3.0 使用圆角、白底、黑字和约 3 像素黑色外轮廓，自动跟随左侧选中的本地对话，并支持当前用户登录自启动。
+Windows 上只读的 Codex 桌面悬浮状态条：**有效 TPS · 本轮输出 · 缓存命中率**。使用圆角、白底、黑字和约 3 像素黑色外轮廓，自动跟随左侧选中的本地对话，并支持当前用户登录自启动。
 
 运行时不需要 API Key，不代理请求，不修改 Codex、认证、配置或会话文件。读取日志时只提取计数、计时和会话身份；不保存或展示对话正文。
 
 ## 使用
 
-双击 `Start-Codex-Rate.cmd`，或直接运行 `dist/CodexRate.exe`。EXE 自带 Python／Tk 运行时，无需另装 Python。源码运行需要 Python 和 Tk：
+从 [GitHub Releases](https://github.com/CrAyoN-V587/codex-rate/releases) 下载 Windows x64 便携 ZIP，解压后双击 `CodexRate.exe` 或 `Start-Codex-Rate.cmd`。也可直接下载单文件 EXE。无需另装 Python 或 .NET SDK。
+
+从源码首次运行需要 Python 和 Tk，先编译当前页读取器并构建 EXE：
 
 ```powershell
+.\build.cmd
 python run.py
 ```
 
@@ -21,7 +24,7 @@ python run.py
 
 ## 开机自启动
 
-三点菜单可选择“启用开机自启动”或“关闭开机自启动”。本次按用户要求已启用；以后更新 EXE 沿用此设置，不必重复注册。
+三点菜单可选择“启用开机自启动”或“关闭开机自启动”。首次下载不会自动注册；更新同一路径下的 EXE 会沿用已有设置，不必重复注册。
 
 自启动仅在当前用户登录时运行，使用 `HKCU/Software/Microsoft/Windows/CurrentVersion/Run` 下的 `CodexRate` 值，命令为带双引号的永久 EXE 路径加 `--background`。不需要管理员权限、不创建服务或计划任务。登录时静默保留托盘，Codex 窗口出现后自动显示。
 
@@ -83,7 +86,7 @@ python run.py --demo --preview
 
 实际工具链：Python 3.12.7、Tk 8.6、PyInstaller 6.22.3。考虑过 Python 3.14，但本机已有的 3.12 已满足标准库需求，首版没有安装新的语言运行时。
 
-0.2.0 验证：51 条回归通过；真实左侧 A→B→A 切换由用户确认成功，观测序号也记录到对应两个会话；切换失效期间返回未知。三点菜单的主题切换与退出经过真实鼠标点击验证。
+v0.3.1 发布验证：70 条回归、编译和独立审阅通过；便携 ZIP 从带空格路径启动后读取真实指标，退出无残留。此前真实左侧 A→B→A 切换、三点菜单主题与退出也已验证。真实 Windows 重启／重登录和双屏／混合 DPI 尚未实测。
 
 ```powershell
 python -m unittest discover -s tests -v
@@ -92,6 +95,8 @@ python -m compileall -q codex_rate run.py
 ```
 
 Python 运行时没有第三方依赖。当前页面读取器使用 Windows 自带的 .NET Framework 4.x／UI Automation，不需要 .NET SDK；`build.cmd` 会先编译 `native/ActiveConversation.cs`，再将它打入单文件 EXE。源码启动自动跟随前也需要先构建这个 helper。`build.cmd` 仅在项目 `.venv` 安装 Python 打包依赖。
+
+创建便携发布包：`python package_release.py`。打包时保留 `licenses/` 与 `THIRD_PARTY_NOTICES.md`；具体分发内容和验证边界见 `RELEASE_NOTES.md`。
 
 构建输出到 `dist/`，中间文件在 `build/`。这三个目录都不提交 Git；退出程序后可手动删除来清理。
 
@@ -104,4 +109,4 @@ Python 运行时没有第三方依赖。当前页面读取器使用 Windows 自�
 - [CodexBar](https://github.com/steipete/CodexBar)：本轮性能与用量的口径区分。
 - [Tokscale](https://github.com/junhoyeo/tokscale)：模型／日期维度统计的参考。
 
-本项目为独立的 Python 实现；未打包或执行上述项目的代码，也未集成它们的运行时。当前为本地个人项目，未公开发布。
+本项目为独立实现，未打包或执行上述参考项目的代码。运行时来源与许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。当前未为原创代码另行声明开源许可证。
