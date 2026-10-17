@@ -27,6 +27,13 @@ class NotifyIcon(c.Structure):
                 ("guid", c.c_byte * 16), ("balloon", w.HICON)]
 
 
+class GuiThreadInfo(c.Structure):
+    _fields_ = [("size", w.DWORD), ("flags", w.DWORD),
+                ("active", w.HWND), ("focus", w.HWND), ("capture", w.HWND),
+                ("menu_owner", w.HWND), ("move_size", w.HWND),
+                ("caret", w.HWND), ("caret_rect", w.RECT)]
+
+
 class Native:
     def __init__(self):
         self.user = c.WinDLL("user32", use_last_error=True)
@@ -40,6 +47,8 @@ class Native:
         self._bind(self.user, "IsIconic", [w.HWND], w.BOOL)
         self._bind(self.user, "GetWindowLongPtrW", [w.HWND, c.c_int], c.c_ssize_t)
         self._bind(self.user, "SetWindowLongPtrW", [w.HWND, c.c_int, c.c_ssize_t], c.c_ssize_t)
+        self._bind(self.user, "GetGUIThreadInfo", [w.DWORD, c.POINTER(GuiThreadInfo)], w.BOOL)
+        self._bind(self.kernel, "GetCurrentThreadId", [], w.DWORD)
         self._bind(self.kernel, "OpenProcess", [w.DWORD, w.BOOL, w.DWORD], w.HANDLE)
         self._bind(self.kernel, "CloseHandle", [w.HANDLE], w.BOOL)
         self._bind(self.kernel, "GetPackageFamilyName",
@@ -139,6 +148,18 @@ class Native:
         style = self.user.GetWindowLongPtrW(hwnd, -20)
         self.user.SetWindowLongPtrW(hwnd, -20, style | 0x08000000 | 0x80)
         return hwnd
+
+    def interactive(self, hwnd, enabled):
+        style = self.user.GetWindowLongPtrW(hwnd, -20)
+        style = style & ~0x08000000 if enabled else style | 0x08000000
+        self.user.SetWindowLongPtrW(hwnd, -20, style)
+        if enabled:
+            self.user.SetForegroundWindow(hwnd)
+
+    def menu_active(self):
+        info = GuiThreadInfo(size=c.sizeof(GuiThreadInfo))
+        return bool(self.user.GetGUIThreadInfo(self.kernel.GetCurrentThreadId(), c.byref(info))
+                    and info.flags & 0x14)  # GUI_INMENUMODE | GUI_POPUPMENUMODE
 
     def place(self, widget, x, y):
         hwnd = self.user.GetAncestor(widget.winfo_id(), 2)

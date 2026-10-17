@@ -1,6 +1,6 @@
 # Codex Rate
 
-Windows 上只读的 Codex 桌面悬浮状态条：**有效 TPS · 本轮输出 · 缓存命中率**。
+Windows 上只读的 Codex 桌面悬浮状态条：**有效 TPS · 本轮输出 · 缓存命中率**。0.2.0 默认圆角、白底、黑字、细黑轮廓，并自动跟随左侧选中的本地对话。
 
 运行时不需要 API Key，不代理请求，不修改 Codex、认证、配置或会话文件。读取日志时只提取计数、计时和会话身份；不保存或展示对话正文。不默认注册开机自启。
 
@@ -15,7 +15,7 @@ python run.py
 - 状态条跟随可见的 Codex 窗口；Codex 最小化或其他应用处于前台时隐藏，托盘仍可访问。
 - **拖动**调整相对位置，位置会保存；**双击**查看指标定义和完整数字；**右键／⋮**打开菜单。
 - 托盘图标左键打开详情，右键打开菜单；菜单可切主题、固定会话、选择最近会话、重置位置和退出。
-- 标注 **“最近”** 时表示最近活动模式：IPC 缺失或同时跟随多个会话，不能确定当前标签。它不保证对应屏幕上打开的聊天。
+- 默认根据左侧对话的“当前页面”标记自动切换。切换加载、页面尚未识别时三项均显示 `--`，不会沿用上一段对话的数字，也不会选取后台最近活动会话代替。
 - `~` 表示本轮未结束，当前显示最近已完成响应边界的测量；不是每个 token 都实时更新。
 - 未运行 Codex 时保留一个等待条，可通过右键或托盘退出。
 
@@ -25,7 +25,7 @@ python run.py
 # 独立窗口，方便看清布局；仍读取真实数据
 python run.py --preview
 
-# 固定会话，排除多个跟随流的歧义
+# 可选：手动固定会话；右键菜单可恢复自动跟随
 python run.py --thread YOUR-CONVERSATION-UUID
 
 # 只读 JSON 快照，适合排障
@@ -59,8 +59,9 @@ python run.py --demo --preview
 
 - 首版支持 Windows 10/11 x64、本地 Codex MSIX 包 `OpenAI.Codex_*`；当前实际运行验证为 Windows 11＋Codex 26.1013.4894.0。
 - 悬浮位置以宿主窗口底部偏移定位，可拖动调整；未使用输入框 UI Automation 锚点，无法保证不同布局自动贴合工具栏。
-- IPC 是内部协议。单个跟随会话时使用它；多个跟随流时显示“最近”活动，不把广播顺序当作当前标签。
-- **多个 Codex 窗口、远程会话、普通 ChatGPT 聊天不在首版验收范围。** 远程 IPC 目标显示不可用，不冒用同 ID 的本地日志。
+- 当前页识别只读取 Windows UI Automation 的 `current=page` 导航名称，并在本地 `threads.name` 中精确、唯一匹配；不使用原始首条提示词作为显示名称。匹配不唯一、侧栏没有可见选中项或读取中断时显示 `--`。
+- **多个 Codex 窗口、远程会话、普通 ChatGPT 聊天不在本版验收范围。** 无障碍名称不是 UUID，远程或其他页面若与某一本地会话完全同名，无法仅凭此接口严格区分。仅验收左侧切换本地对话的行为。
+- IPC 跟随集合不再充当当前页来源；自动跟随也不再回退为“最近”活动。
 - 日志中未提供的逐 token 时间无法恢复，不伪造实时流速。计时受客户端负载、日志延迟和系统时钟变化影响。
 - 负坐标通过原生 `SetWindowPos` 处理；尚未进行真实双屏／不同 DPI 显示器之间的拖动实测。
 
@@ -68,15 +69,19 @@ python run.py --demo --preview
 
 实际工具链：Python 3.12.7、Tk 8.6、PyInstaller 6.22.3。考虑过 Python 3.14，但本机已有的 3.12 已满足标准库需求，首版没有安装新的语言运行时。
 
+0.2.0 验证：51 条回归通过；真实左侧 A→B→A 切换由用户确认成功，观测序号也记录到对应两个会话；切换失效期间返回未知。三点菜单的主题切换与退出经过真实鼠标点击验证。
+
 ```powershell
 python -m unittest discover -s tests -v
 python -m compileall -q codex_rate run.py
 .\build.cmd
 ```
 
-运行时没有第三方依赖；`build.cmd` 仅在项目 `.venv` 安装打包依赖。构建输出到 `dist/`，中间文件在 `build/`。这三个目录都不提交 Git；退出程序后可手动删除来清理。
+Python 运行时没有第三方依赖。当前页面读取器使用 Windows 自带的 .NET Framework 4.x／UI Automation，不需要 .NET SDK；`build.cmd` 会先编译 `native/ActiveConversation.cs`，再将它打入单文件 EXE。源码启动自动跟随前也需要先构建这个 helper。`build.cmd` 仅在项目 `.venv` 安装 Python 打包依赖。
 
-源码职责：`metrics.py` 计量、`reader.py` 增量读日志、`ipc.py` 会话跟随、`windows.py` Win32／托盘、`app.py` 界面与生命周期。
+构建输出到 `dist/`，中间文件在 `build/`。这三个目录都不提交 Git；退出程序后可手动删除来清理。
+
+源码职责：`metrics.py` 计量、`reader.py` 增量读日志、`active.py`／`native/ActiveConversation.cs` 当前对话识别、`ipc.py` 跟随流元数据、`windows.py` Win32／托盘、`app.py` 界面与生命周期。
 
 ## 参考
 

@@ -4,7 +4,7 @@
 
 - 目标：Windows 上只读的 Codex 桌面悬浮状态条。
 - 入口：`run.py`；核心包：`codex_rate/`；回归：`python -m unittest discover -s tests -v`。
-- 运行时仅使用 Python 标准库。打包依赖仅装入项目 `.venv`。
+- Python 侧仅使用标准库；当前页识别 helper 使用 Windows 自带 .NET Framework／UI Automation。Python 打包依赖仅装入项目 `.venv`。
 - 不修改 Codex 安装、配置、认证或会话文件，不代理模型请求。
 - 日志只提取数值、计时和会话身份；不得把真实对话正文或原始日志写入仓库。
 - 新旧 token 事件不能叠加；缺失计时、部分恢复和取消不能伪装成完整 TPS。

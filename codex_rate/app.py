@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from .ipc import IpcWatcher
+from .active import ActiveWatcher
 from .metrics import Meter, compact
 from .reader import SessionIndex, SessionReader, codex_home
 
@@ -14,35 +15,45 @@ class Monitor:
     def __init__(self, home, thread_id=None):
         self.index = SessionIndex(home)
         self.ipc = IpcWatcher()
+        self.active = ActiveWatcher(home)
         self.pinned = thread_id
         self.stop = threading.Event()
         self.lock = threading.Lock()
         self.readers = {}
         self.missing_target = None
+        self.selected_key = None
         self.value = {"mode": "starting", "thread": None,
                       "measurement": Meter().snapshot().to_dict(), "error": None}
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
         self.ipc.start()
+        self.active.start()
         self.thread.start()
 
     def update(self):
         self.index.refresh()
         selected, connected, ipc_error = self.ipc.selection.snapshot()
-        candidates = self.ipc.selection.local_threads()
+        active = self.active.snapshot()
         with self.lock:
             pinned = self.pinned
-        target = pinned or selected
-        mode = ("pinned" if pinned else "remote" if ipc_error == "remote-session-unsupported"
-                else "ipc" if selected else "recent")
-        path = (None if mode == "remote" else self.index.find(target) if target
-                else self.index.latest_desktop(candidates))
-        if target and path is None and mode != "remote" and self.missing_target != target:
+        target = pinned or active["thread"]
+        mode = "pinned" if pinned else "active"
+        key = (pinned, active["serial"] if not pinned else None, target)
+        if key != self.selected_key:
+            self.selected_key = key
+            value = {"mode": "loading", "thread": target, "active_serial": active["serial"],
+                     "measurement": Meter().snapshot().to_dict(), "error": "conversation-loading",
+                     "ipc_connected": connected, "ipc_error": None}
+            with self.lock:
+                self.value = value
+            return value
+        path = Path(active["path"]) if not pinned and active["path"] else self.index.find(target) if target else None
+        if target and path is None and self.missing_target != target:
             self.index.refresh(force=True)
             path = self.index.find(target)
         self.missing_target = target if path is None else None
-        error = "remote-session-unsupported" if mode == "remote" else self.index.error
+        error = active["error"] if not pinned else self.index.error
         if path:
             reader = self.readers.get(path)
             if reader is None:
@@ -51,13 +62,14 @@ class Monitor:
                 reader = self.readers[path] = SessionReader(path)
             measurement = reader.poll().to_dict()
             error = reader.error or ("malformed-jsonl" if "malformed-jsonl" in measurement["warnings"] else error)
-            thread_id = target or next((t for t in candidates if t in path.stem), path.stem[-36:])
+            thread_id = target
         else:
             measurement = Meter().snapshot().to_dict()
             thread_id = target
             error = error or ("selected-log-unavailable" if target else "no-session")
         value = {"mode": mode, "thread": thread_id, "measurement": measurement,
-                 "error": error, "ipc_connected": connected, "ipc_error": ipc_error}
+                 "error": error, "ipc_connected": connected, "ipc_error": None,
+                 "active_serial": active["serial"]}
         with self.lock:
             self.value = value
         return value
@@ -73,15 +85,27 @@ class Monitor:
 
     def snapshot(self):
         with self.lock:
-            return dict(self.value)
+            value = dict(self.value)
+            pinned = self.pinned
+        active = self.active.snapshot()
+        if ((not pinned and (active["serial"] != value.get("active_serial") or active["error"]
+                             or value["mode"] == "pinned"))
+                or (pinned and value["thread"] != pinned)):
+            value.update(mode="loading", thread=active["thread"],
+                         measurement=Meter().snapshot().to_dict(),
+                         error=active["error"] or "conversation-loading")
+        return value
 
     def pin(self, thread_id):
         with self.lock:
             self.pinned = thread_id
+            self.value = dict(self.value, mode="loading", thread=thread_id,
+                              measurement=Meter().snapshot().to_dict(), error="conversation-loading")
 
     def close(self):
         self.stop.set()
         self.ipc.stop.set()
+        self.active.close()
         self.thread.join(timeout=2)
 
 
@@ -104,16 +128,25 @@ class Strip:
 
         self.tk, self.native, self.args = tk, native, args
         self.settings_path = args.settings
-        self.settings = {"theme": "dark", "right": 26, "bottom": 66}
+        self.settings = {"theme": "light", "right": 26, "bottom": 66}
         self.settings.update(load_settings(self.settings_path))
         self.root = tk.Tk()
         self.root.title("Codex Rate")
         self.root.overrideredirect(not args.preview)
         self.root.attributes("-topmost", True)
+        self.transparent = "#ff00ff"
+        self.root.configure(bg=self.transparent)
+        self.root.attributes("-transparentcolor", self.transparent)
+        self.root.resizable(False, False)
         self.root.geometry("+100+100")
-        self.frame = tk.Frame(self.root, bd=1, relief="solid")
-        self.frame.pack(fill="both", expand=True)
-        self.status = tk.Label(self.frame, text="●", font=("Segoe UI", 10), padx=9)
+        self.surface = tk.Canvas(self.root, bg=self.transparent, bd=0, highlightthickness=0)
+        self.surface.pack(fill="both", expand=True)
+        self.outline = self.surface.create_polygon(0, 0, 1, 0, 1, 1, 0, 1,
+            smooth=True, splinesteps=24, width=1)
+        self.frame = tk.Frame(self.surface, bd=0)
+        self.surface.create_window(12, 5, anchor="nw", window=self.frame)
+        self.frame.bind("<Configure>", self.layout)
+        self.status = tk.Label(self.frame, text="●", font=("Segoe UI", 10), padx=5)
         self.status.pack(side="left")
         self.fields = []
         for label, initial in (("有效TPS", "-- tok/s"), ("本轮输出", "--"), ("缓存", "--")):
@@ -124,10 +157,14 @@ class Strip:
             value = tk.Label(group, text=initial, font=("Segoe UI Semibold", 11))
             value.pack(side="left")
             self.fields.append(value)
-        self.menu_button = tk.Label(self.frame, text="⋮", font=("Segoe UI", 13), padx=8)
+        self.menu_button = tk.Label(self.frame, text="⋮", font=("Segoe UI", 13),
+                                    padx=8, cursor="hand2")
         self.menu_button.pack(side="left", fill="y")
         self.detail = None
         self.detail_text = None
+        self.menu = None
+        self.menu_open = False
+        self.menu_check_handle = None
         self.closed = False
         self.tick_handle = None
         self.exit_handle = None
@@ -144,8 +181,11 @@ class Strip:
             self.monitor.start()
         self.tray = Tray(native)
         self.tray.start()
-        self.bind_children(self.frame)
+        self.bind_children(self.surface)
         self.menu_button.bind("<Button-1>", self.popup)
+        self.menu_button.unbind("<Double-Button-1>")
+        self.menu_button.bind("<Enter>", lambda _: self.menu_button.configure(bg=self.hover))
+        self.menu_button.bind("<Leave>", lambda _: self.menu_button.configure(bg=self.bg))
         self.root.bind("<Escape>", lambda _: self.hide_details())
         self.root.protocol("WM_DELETE_WINDOW", self.close)
         if args.exit_after:
@@ -161,12 +201,25 @@ class Strip:
         for child in widget.winfo_children():
             self.bind_children(child)
 
+    def layout(self, _=None):
+        width = self.frame.winfo_reqwidth() + 24
+        height = self.frame.winfo_reqheight() + 10
+        radius = min(16, height / 2)
+        left, top, right, bottom = 0.5, 0.5, width - 0.5, height - 0.5
+        self.surface.configure(width=width, height=height)
+        self.surface.coords(self.outline,
+            left + radius, top, right - radius, top, right, top,
+            right, top + radius, right, bottom - radius, right, bottom,
+            right - radius, bottom, left + radius, bottom, left, bottom,
+            left, bottom - radius, left, top + radius, left, top)
+
     def paint(self):
         dark = self.settings["theme"] == "dark"
-        self.bg = "#181d27" if dark else "#f5f7fa"
-        self.fg = "#edf2f9" if dark else "#172136"
-        self.muted = "#9aa9bd" if dark else "#52657d"
-        self.accent = "#62d8d3" if dark else "#087d78"
+        self.bg = "#202020" if dark else "#ffffff"
+        self.fg = "#f5f5f5" if dark else "#111111"
+        self.muted = "#d0d0d0" if dark else "#222222"
+        self.accent = self.fg
+        self.hover = "#3b3b3b" if dark else "#eeeeee"
 
         def color(widget):
             widget.configure(bg=self.bg)
@@ -176,9 +229,11 @@ class Strip:
                 color(child)
 
         color(self.frame)
-        self.frame.configure(highlightbackground="#344052" if dark else "#c8d2e0")
-        for index, field in enumerate(self.fields):
-            field.configure(fg=self.accent if index == 0 else self.fg)
+        self.surface.itemconfigure(self.outline, fill=self.bg,
+                                   outline="#a0a0a0" if dark else "#111111")
+        for field in self.fields:
+            field.configure(fg=self.fg)
+        self.menu_button.configure(fg=self.fg)
         self.status.configure(fg=self.accent)
         if self.detail and self.detail.winfo_exists():
             self.detail.configure(bg=self.bg)
@@ -213,15 +268,14 @@ class Strip:
         _, rect, visible = self.native.host()
         self.host_rect = rect
         force_show = time.monotonic() < self.force_show_until
-        if self.args.demo or self.args.preview or force_show:
+        interacting = (self.menu_open or self.drag is not None or
+                       (self.detail is not None and self.detail.winfo_exists()))
+        if self.args.demo or self.args.preview or force_show or interacting:
             self.root.deiconify()
         elif rect and visible:
             self.root.deiconify()
             if not self.drag:
-                width, height = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
-                x = max(rect[0] + 8, rect[2] - width - self.settings["right"])
-                y = max(rect[1] + 8, rect[3] - height - self.settings["bottom"])
-                self.native.place(self.root, x, y)
+                self.place_at_host()
         elif rect:
             self.root.withdraw()
         else:
@@ -243,14 +297,15 @@ class Strip:
 
     def describe(self, value):
         m = value["measurement"]
-        names = {"ipc": "IPC 跟随会话", "pinned": "手动固定会话",
+        names = {"active": "自动跟随左侧选中对话", "loading": "正在加载当前对话",
+                 "ipc": "IPC 跟随会话", "pinned": "手动固定会话",
                  "recent": "最近活动 · 降级模式", "remote": "远程会话 · 暂不支持",
                  "starting": "正在连接", "demo": "演示数据"}
         states = {"idle": "等待数据", "waiting": "等待本轮首个响应",
                   "active": "本轮进行中 · 响应结束后刷新", "completed": "本轮完成",
                   "aborted": "本轮已取消 · 不显示 TPS"}
         number = lambda n: "--" if n is None else f"{n:,}"
-        lines = ["CODEX RATE  /  0.1.0", "",
+        lines = ["CODEX RATE  /  0.2.0", "",
                  names[value["mode"]], f"会话：{value['thread'] or '--'}",
                  states.get(m["state"], m["state"]), "",
                  f"本轮输出：{number(m['output'])} token（含推理）",
@@ -278,7 +333,9 @@ class Strip:
     def show_details(self):
         if self.detail and self.detail.winfo_exists():
             self.detail.lift()
+            self.detail.focus_force()
             return
+        self.root.deiconify()
         self.detail = self.tk.Toplevel(self.root)
         self.detail.title("Codex Rate · 指标详情")
         self.detail.protocol("WM_DELETE_WINDOW", self.hide_details)
@@ -296,14 +353,20 @@ class Strip:
         self.native.place(self.detail, self.root.winfo_x(), y)
         self.detail.bind("<Escape>", lambda _: self.hide_details())
         self.paint()
+        self.detail.focus_force()
 
     def hide_details(self):
         if self.detail and self.detail.winfo_exists():
             self.detail.destroy()
         self.detail = None
+        self.detail_text = None
 
     def popup(self, event=None):
-        menu = self.tk.Menu(self.root, tearoff=False)
+        if self.closed or self.menu_open:
+            return "break"
+        if self.menu is not None:
+            self.menu.destroy()
+        menu = self.menu = self.tk.Menu(self.root, tearoff=False)
         menu.add_command(label="指标详情", command=self.show_details)
         menu.add_separator()
         menu.add_command(label="自动跟随会话", command=lambda: self.monitor.pin(None))
@@ -315,7 +378,8 @@ class Strip:
             candidate = path.stem[-36:]
             recent.add_command(label=candidate[:8] + "…" + candidate[-6:],
                                command=lambda t=candidate: self.monitor.pin(t))
-        menu.add_cascade(label="选择最近会话", menu=recent)
+        menu.add_cascade(label="选择最近会话", menu=recent,
+                         state="normal" if self.monitor.index.paths else "disabled")
         menu.add_separator()
         menu.add_command(label="切换明暗主题", command=self.toggle_theme)
         menu.add_command(label="重置位置", command=self.reset_position)
@@ -323,6 +387,12 @@ class Strip:
         menu.add_command(label="退出 Codex Rate", command=self.close)
         x = event.x_root if event else self.root.winfo_pointerx()
         y = event.y_root if event else self.root.winfo_pointery()
+        self.root.deiconify()
+        self.menu_open = True
+        if not self.args.preview:
+            self.native.interactive(self.hwnd, True)
+        else:
+            self.native.user.SetForegroundWindow(self.hwnd)
         try:
             menu.tk_popup(x, y)
         except self.tk.TclError:
@@ -330,8 +400,23 @@ class Strip:
                 raise
         finally:
             if not self.closed:
-                menu.grab_release()
-                menu.destroy()
+                # Windows can dispatch the chosen command after tk_popup returns.
+                # Keep the menu alive, and wait until native menu tracking ends
+                # before restoring the strip's non-activating window style.
+                self.menu_check_handle = self.root.after_idle(self.check_menu)
+        return "break"
+
+    def check_menu(self):
+        self.menu_check_handle = None
+        if self.closed:
+            return
+        if self.native.menu_active():
+            self.menu_check_handle = self.root.after(50, self.check_menu)
+            return
+        self.menu_open = False
+        self.menu.grab_release()
+        if not self.args.preview:
+            self.native.interactive(self.hwnd, False)
 
     def toggle_theme(self):
         self.settings["theme"] = "light" if self.settings["theme"] == "dark" else "dark"
@@ -340,7 +425,18 @@ class Strip:
 
     def reset_position(self):
         self.settings.update(right=26, bottom=66)
+        if self.host_rect:
+            self.place_at_host()
+        else:
+            self.native.place(self.root, 100, 100)
         self.save()
+
+    def place_at_host(self):
+        rect = self.host_rect
+        width, height = self.root.winfo_reqwidth(), self.root.winfo_reqheight()
+        x = max(rect[0] + 8, rect[2] - width - self.settings["right"])
+        y = max(rect[1] + 8, rect[3] - height - self.settings["bottom"])
+        self.native.place(self.root, x, y)
 
     def drag_start(self, event):
         self.drag = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
@@ -372,7 +468,7 @@ class Strip:
         if self.closed:
             return
         self.closed = True
-        for handle in (self.tick_handle, self.exit_handle):
+        for handle in (self.tick_handle, self.exit_handle, self.menu_check_handle):
             if handle:
                 self.root.after_cancel(handle)
         if not self.args.demo:
@@ -409,14 +505,17 @@ def main():
     if args.snapshot:
         monitor = Monitor(args.home, args.thread)
         monitor.ipc.start()
+        monitor.active.start()
         try:
-            for _ in range(10):
-                if monitor.ipc.selection.snapshot()[0] or args.thread:
+            for _ in range(30):
+                if monitor.active.snapshot()["thread"] or args.thread:
                     break
                 time.sleep(0.1)
+            monitor.update()
             print(json.dumps(monitor.update(), ensure_ascii=False, indent=2))
         finally:
             monitor.ipc.stop.set()
+            monitor.active.close()
         return
     if os.name != "nt":
         parser.error("The strip requires Windows 10/11; --snapshot can run elsewhere.")
