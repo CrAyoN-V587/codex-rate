@@ -50,6 +50,8 @@ ACTIVITY_NAMES = {
     "completed": "本轮完成", "aborted": "本轮已取消",
 }
 
+DETECTION_INTERVAL = 30.0
+
 
 class Monitor:
     def __init__(self, home, thread_id=None):
@@ -62,6 +64,9 @@ class Monitor:
         self.readers = {}
         self.missing_target = None
         self.selected_key = None
+        self.detection_key = None
+        self.detected_at = None
+        self.detected_sample = None
         self.value = {"mode": "starting", "thread": None,
                       "measurement": Meter().snapshot().to_dict(), "error": None}
         self.thread = threading.Thread(target=self._run, daemon=True)
@@ -82,6 +87,7 @@ class Monitor:
         key = (pinned, active["serial"] if not pinned else None, target)
         if key != self.selected_key:
             self.selected_key = key
+            self.detected_at = None
             value = {"mode": "loading", "thread": target, "active_serial": active["serial"],
                      "measurement": Meter().snapshot().to_dict(), "error": "conversation-loading",
                      "ipc_connected": connected, "ipc_error": None}
@@ -112,9 +118,24 @@ class Monitor:
             measurement = Meter().snapshot().to_dict()
             thread_id = target
             error = error or ("selected-log-unavailable" if target else "no-session")
+        detection_key = (target, measurement["turn_id"])
+        sample = (measurement["samples"], measurement["sampled_at_ms"])
+        checking = (not error and measurement["state"] in ("waiting", "active")
+                    and measurement["turn_id"] is not None and reader_status is not None
+                    and reader_status["backlog_bytes"] == 0)
+        if checking:
+            now = time.monotonic()
+            if (self.detected_at is None or detection_key != self.detection_key
+                    or sample != self.detected_sample or now - self.detected_at >= DETECTION_INTERVAL):
+                self.detected_at = now
+                self.detected_sample = sample
+        else:
+            self.detected_at = None
+        self.detection_key = detection_key
         value = {"mode": mode, "thread": thread_id, "measurement": measurement,
                  "error": error, "ipc_connected": connected, "ipc_error": None,
-                 "active_serial": active["serial"], "reader": reader_status}
+                 "active_serial": active["serial"], "reader": reader_status,
+                 "detected_at": self.detected_at}
         with self.lock:
             self.value = value
         return value
@@ -138,14 +159,14 @@ class Monitor:
                 or (pinned and value["thread"] != pinned)):
             value.update(mode="loading", thread=active["thread"],
                          measurement=Meter().snapshot().to_dict(),
-                         error=active["error"] or "conversation-loading", reader=None)
+                         error=active["error"] or "conversation-loading", reader=None, detected_at=None)
         return value
 
     def pin(self, thread_id):
         with self.lock:
             self.pinned = thread_id
             self.value = dict(self.value, mode="loading", thread=thread_id,
-                              measurement=Meter().snapshot().to_dict(), error="conversation-loading", reader=None)
+                              measurement=Meter().snapshot().to_dict(), error="conversation-loading", reader=None, detected_at=None)
 
     def close(self):
         self.stop.set()
@@ -329,8 +350,9 @@ class Strip:
         self.fields[1].configure(text=compact(m["output"]) if not unavailable else "--")
         cache = m["cache_percent"] if not unavailable else None
         self.fields[2].configure(text=f"{cache:.0f}%" if cache is not None else "--")
-        sampled_at = m.get("sampled_at_ms")
-        age = max(0, int(time.time() - sampled_at / 1000)) if sampled_at is not None and not unavailable else None
+        detected_at = value.get("detected_at")
+        age = (max(0, int(time.monotonic() - detected_at)) if detected_at is not None
+               and not unavailable and m["state"] in ("waiting", "active") else None)
         self.last_detection.configure(text=f"上次检测：{age}秒之前" if age is not None else "上次检测：--")
         activity = {"tool": "工具", "agent": "代理", "waiting-response": "等待"}.get(m.get("activity"), "●")
         self.status.configure(text="演示" if self.args.demo else "●" if unavailable else activity,

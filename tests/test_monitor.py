@@ -10,6 +10,41 @@ from test_reader import lines
 
 
 class MonitorRecoveryTests(unittest.TestCase):
+    def test_active_turn_rechecks_every_30_seconds_without_inventing_usage(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / "sessions").mkdir()
+            path = home / "sessions" / "rollout-thread-a.jsonl"
+            path.write_bytes(lines(row("task_started", turn_id="t1"), sample()))
+            monitor = Monitor(home, "thread-a")
+            with patch("codex_rate.app.time.monotonic", return_value=100) as clock:
+                monitor.update()
+                initial = monitor.update()
+                self.assertEqual(initial["detected_at"], 100)
+                clock.return_value = 129.9
+                self.assertEqual(monitor.update()["detected_at"], 100)
+                clock.return_value = 130
+                checked = monitor.update()
+                self.assertEqual(checked["detected_at"], 130)
+                self.assertEqual(checked["measurement"], initial["measurement"])
+                # New usage refreshes immediately, without waiting for the timer.
+                with path.open("ab") as stream:
+                    stream.write(lines(sample(ms=2000, response="r2", total=usage(200, 2000, 1000))))
+                clock.return_value = 135
+                self.assertEqual(monitor.update()["detected_at"], 135)
+                with path.open("ab") as stream:
+                    stream.write(lines(row("task_complete", 3000, turn_id="t1")))
+                done = monitor.update()
+                self.assertIsNone(done["detected_at"])
+                self.assertEqual(done["measurement"]["output"], 200)
+                clock.return_value = 200
+                self.assertIsNone(monitor.update()["detected_at"])
+                with path.open("ab") as stream:
+                    stream.write(lines(row("task_started", 4000, turn_id="t2")))
+                self.assertEqual(monitor.update()["detected_at"], 200)
+                path.unlink()
+                self.assertIsNone(monitor.update()["detected_at"])
+
     def test_large_tool_output_keeps_all_three_metrics_and_next_response_updates(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)

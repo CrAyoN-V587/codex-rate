@@ -101,20 +101,29 @@ class StripTests(unittest.TestCase):
         self.assertEqual(strip.fields[1].configure.call_args.kwargs["text"], "--")
         self.assertEqual(strip.fields[2].configure.call_args.kwargs["text"], "--")
 
-    def test_footer_age_advances_without_new_usage_and_clears_when_unavailable(self):
+    def test_footer_age_advances_between_checks_and_clears_when_unavailable(self):
         strip = self.strip
-        strip.data.return_value["measurement"]["sampled_at_ms"] = 1000
+        strip.data.return_value["detected_at"] = 1
+        strip.data.return_value["measurement"]["state"] = "active"
         for now, expected in ((2, "上次检测：1秒之前"), (8, "上次检测：7秒之前"), (0, "上次检测：0秒之前")):
-            with patch("codex_rate.app.time.time", return_value=now):
+            with patch("codex_rate.app.time.monotonic", return_value=now):
                 strip.tick()
             self.assertEqual(strip.last_detection.configure.call_args.kwargs["text"], expected)
         strip.data.return_value["error"] = "conversation-loading"
         strip.tick()
         self.assertEqual(strip.last_detection.configure.call_args.kwargs["text"], "上次检测：--")
         strip.data.return_value["error"] = None
-        strip.data.return_value["measurement"]["sampled_at_ms"] = None
+        strip.data.return_value["detected_at"] = None
         strip.tick()
         self.assertEqual(strip.last_detection.configure.call_args.kwargs["text"], "上次检测：--")
+
+    def test_completed_or_cancelled_turn_hides_detection_age(self):
+        strip = self.strip
+        strip.data.return_value["detected_at"] = 1
+        for state in ("completed", "aborted", "idle"):
+            strip.data.return_value["measurement"]["state"] = state
+            strip.tick()
+            self.assertEqual(strip.last_detection.configure.call_args.kwargs["text"], "上次检测：--")
 
     def test_details_explain_activity_age_and_missing_data_in_chinese(self):
         from codex_rate.metrics import Meter
