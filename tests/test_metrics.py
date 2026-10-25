@@ -36,6 +36,44 @@ def started(modern=True):
 
 
 class MeterTests(unittest.TestCase):
+    def test_tools_and_agent_dispatch_keep_last_measurement(self):
+        meter = started()
+        meter.observe(sample())
+        original = meter.snapshot()
+        for name, expected in (("functions.exec", "tool"), ("spawn_agent", "agent"), ("wait_agent", "agent")):
+            meter.observe({"type": "response_item", "payload": {
+                "type": "function_call", "name": name, "call_id": "call-a"}})
+            result = meter.snapshot()
+            self.assertEqual(result.activity, expected)
+            self.assertEqual((result.tps, result.output, result.cache_percent),
+                             (original.tps, original.output, original.cache_percent))
+            self.assertEqual(result.sampled_at_ms, BASE + 1000)
+        meter.observe({"type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-a"}})
+        self.assertEqual(meter.snapshot().activity, "waiting-response")
+        self.assertEqual(meter.snapshot().samples, 1)
+
+    def test_call_before_usage_record_keeps_activity_and_zero_agent_timing(self):
+        meter = started()
+        meter.observe({"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec"}})
+        meter.observe(sample())
+        self.assertEqual(meter.snapshot().activity, "tool")
+        meter.observe(item("SubAgentActivity", 1000, 1000))
+        self.assertEqual(meter.snapshot().activity, "agent")
+        self.assertEqual(meter.snapshot().tps, 100)
+        meter.observe(item("Reasoning", 1000, 2000))
+        self.assertEqual(meter.snapshot().activity, "model")
+
+    def test_activity_does_not_leak_from_previous_turn_or_late_tool_output(self):
+        meter = started()
+        meter.observe(sample())
+        meter.observe(row("task_complete", 2000, turn_id="t1"))
+        meter.observe({"type": "response_item", "payload": {"type": "function_call_output"}})
+        self.assertEqual(meter.snapshot().activity, "completed")
+        meter.observe(row("task_started", 3000, turn_id="t2"))
+        self.assertEqual(meter.snapshot().activity, "waiting")
+        self.assertIsNone(meter.snapshot().sampled_at_ms)
+        self.assertIsNone(meter.snapshot().output)
+
     def test_output_and_cache_are_distinct_from_total_and_reasoning(self):
         meter = started()
         record = sample()

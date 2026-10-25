@@ -10,6 +10,45 @@ from .active import ActiveWatcher
 from .metrics import Meter, compact
 from .reader import SessionIndex, SessionReader, codex_home
 from . import startup
+from . import __version__
+
+
+STATUS_MESSAGES = {
+    "conversation-loading": "正在切换或加载对话",
+    "active-page-loading": "正在识别选中对话",
+    "active-page-changing": "页面正在更新，等待重新识别",
+    "active-page-unavailable": "未找到可识别的选中对话，请确认侧栏可见",
+    "ambiguous-active-page": "选中名称对应多个本地会话，请手动固定会话",
+    "thread-metadata-unavailable": "无法读取本地会话索引",
+    "active-reader-stale": "页面识别暂未响应，正在恢复",
+    "active-reader-stopped": "页面识别程序已退出，正在恢复",
+    "active-reader-unavailable": "页面识别程序不可用",
+    "invalid-active-metadata": "页面识别返回的数据不可用",
+    "no-codex-window": "等待 Codex 窗口",
+    "selected-log-unavailable": "选中会话的本地日志尚不可用",
+    "no-session": "等待选中本地会话",
+    "log-recovering": "正在恢复长日志中的本轮记录",
+    "malformed-jsonl": "本轮存在损坏或无法安全解析的计量记录",
+    "partial-turn": "仅取得本轮部分记录，暂不计算 TPS",
+    "insufficient-timing": "缺少完整计时或有效耗时不足 0.5 秒",
+    "invalid-item-timing": "活动计时无效，暂不计算 TPS",
+    "turn-usage-mismatch": "响应总量与本轮累计量不一致",
+    "carrier-changed-mid-turn": "本轮计量格式发生切换",
+    "missing-response-id": "计量记录缺少响应标识",
+    "invalid-usage": "Token 计数无效",
+    "conflicting-response-usage": "同一响应出现矛盾计数",
+    "missing-legacy-cumulative": "旧格式缺少累计计数",
+    "tray-unavailable": "系统托盘不可用",
+    "ElementNotAvailableException": "页面正在更新，等待重新识别",
+    "COMException": "无障碍接口暂时不可用，等待重新识别",
+}
+
+ACTIVITY_NAMES = {
+    "idle": "等待数据", "waiting": "等待本轮首个响应",
+    "model": "模型响应", "tool": "工具调用", "agent": "子代理调度",
+    "waiting-response": "工具已返回，等待后续响应",
+    "completed": "本轮完成", "aborted": "本轮已取消",
+}
 
 
 class Monitor:
@@ -55,6 +94,7 @@ class Monitor:
             path = self.index.find(target)
         self.missing_target = target if path is None else None
         error = active["error"] if not pinned else self.index.error
+        reader_status = None
         if path:
             reader = self.readers.get(path)
             if reader is None:
@@ -62,7 +102,11 @@ class Monitor:
                     self.readers.pop(next(iter(self.readers)))
                 reader = self.readers[path] = SessionReader(path)
             measurement = reader.poll().to_dict()
-            error = reader.error or ("malformed-jsonl" if "malformed-jsonl" in measurement["warnings"] else error)
+            reader_status = {name: getattr(reader, name) for name in (
+                "recovering", "recovery_state", "recovery_bytes", "recovery_limited",
+                "skipped_non_metric", "backlog_bytes")}
+            error = reader.error or ("log-recovering" if reader.recovering else
+                "malformed-jsonl" if "malformed-jsonl" in measurement["warnings"] else error)
             thread_id = target
         else:
             measurement = Meter().snapshot().to_dict()
@@ -70,7 +114,7 @@ class Monitor:
             error = error or ("selected-log-unavailable" if target else "no-session")
         value = {"mode": mode, "thread": thread_id, "measurement": measurement,
                  "error": error, "ipc_connected": connected, "ipc_error": None,
-                 "active_serial": active["serial"]}
+                 "active_serial": active["serial"], "reader": reader_status}
         with self.lock:
             self.value = value
         return value
@@ -94,14 +138,14 @@ class Monitor:
                 or (pinned and value["thread"] != pinned)):
             value.update(mode="loading", thread=active["thread"],
                          measurement=Meter().snapshot().to_dict(),
-                         error=active["error"] or "conversation-loading")
+                         error=active["error"] or "conversation-loading", reader=None)
         return value
 
     def pin(self, thread_id):
         with self.lock:
             self.pinned = thread_id
             self.value = dict(self.value, mode="loading", thread=thread_id,
-                              measurement=Meter().snapshot().to_dict(), error="conversation-loading")
+                              measurement=Meter().snapshot().to_dict(), error="conversation-loading", reader=None)
 
     def close(self):
         self.stop.set()
@@ -150,22 +194,27 @@ class Strip:
         self.body = self.surface.create_polygon(0, 0, 1, 0, 1, 1, 0, 1,
             smooth=True, splinesteps=24, width=0)
         self.frame = tk.Frame(self.surface, bd=0)
-        self.surface.create_window(12, 8, anchor="nw", window=self.frame)
+        self.frame_window = self.surface.create_window(12, 8, anchor="nw", window=self.frame)
         self.frame.bind("<Configure>", self.layout)
-        self.status = tk.Label(self.frame, text="●", font=("Segoe UI", 10), padx=5)
+        self.metric_row = tk.Frame(self.frame, bd=0)
+        self.metric_row.pack(fill="x")
+        self.status = tk.Label(self.metric_row, text="●", font=("Segoe UI", 10), padx=5)
         self.status.pack(side="left")
         self.fields = []
         for label, initial in (("有效TPS", "-- tok/s"), ("本轮输出", "--"), ("缓存", "--")):
-            group = tk.Frame(self.frame)
+            group = tk.Frame(self.metric_row)
             group.pack(side="left", padx=(0, 15), pady=7)
             caption = tk.Label(group, text=label, font=("Microsoft YaHei UI", 9))
             caption.pack(side="left", padx=(0, 6))
             value = tk.Label(group, text=initial, font=("Segoe UI Semibold", 11))
             value.pack(side="left")
             self.fields.append(value)
-        self.menu_button = tk.Label(self.frame, text="⋮", font=("Segoe UI", 13),
+        self.menu_button = tk.Label(self.metric_row, text="⋮", font=("Segoe UI", 13),
                                     padx=8, cursor="hand2")
-        self.menu_button.pack(side="left", fill="y")
+        self.menu_button.pack(side="right", fill="y")
+        self.last_detection = tk.Label(self.frame, text="上次检测：--", anchor="w",
+            font=("Microsoft YaHei UI", 8), padx=5)
+        self.last_detection.pack(fill="x", pady=(0, 3))
         self.detail = None
         self.detail_text = None
         self.menu = None
@@ -209,10 +258,11 @@ class Strip:
             self.bind_children(child)
 
     def layout(self, _=None):
-        width = self.frame.winfo_reqwidth() + 24
+        width = max(620, self.frame.winfo_reqwidth() + 24)
         height = self.frame.winfo_reqheight() + 16
         radius = min(16, height / 2)
         self.surface.configure(width=width, height=height)
+        self.surface.itemconfigure(self.frame_window, width=width - 24)
         # A withdrawn Tk window otherwise retains Canvas's large default size
         # when its first native host-placement event arrives before mapping.
         self.root.geometry(f"{width}x{height}")
@@ -260,7 +310,8 @@ class Strip:
                                     "cached": 21600, "cache_percent": 90.0,
                                     "state": "completed", "elapsed_ms": 25296,
                                     "carrier": "synthetic", "samples": 4,
-                                    "complete_start": True, "warnings": []}}
+                                    "complete_start": True, "warnings": [],
+                                    "sampled_at_ms": int((time.time() - 2) * 1000)}}
         return self.monitor.snapshot()
 
     def tick(self):
@@ -278,7 +329,11 @@ class Strip:
         self.fields[1].configure(text=compact(m["output"]) if not unavailable else "--")
         cache = m["cache_percent"] if not unavailable else None
         self.fields[2].configure(text=f"{cache:.0f}%" if cache is not None else "--")
-        self.status.configure(text="演示" if self.args.demo else "最近" if value["mode"] == "recent" else "●",
+        sampled_at = m.get("sampled_at_ms")
+        age = max(0, int(time.time() - sampled_at / 1000)) if sampled_at is not None and not unavailable else None
+        self.last_detection.configure(text=f"上次检测：{age}秒之前" if age is not None else "上次检测：--")
+        activity = {"tool": "工具", "agent": "代理", "waiting-response": "等待"}.get(m.get("activity"), "●")
+        self.status.configure(text="演示" if self.args.demo else "●" if unavailable else activity,
             fg="#e9b86e" if unavailable or value["mode"] == "recent" else self.accent)
         self.root.update_idletasks()
         force_show = time.monotonic() < self.force_show_until
@@ -331,7 +386,7 @@ class Strip:
                   "active": "本轮进行中 · 响应结束后刷新", "completed": "本轮完成",
                   "aborted": "本轮已取消 · 不显示 TPS"}
         number = lambda n: "--" if n is None else f"{n:,}"
-        lines = ["CODEX RATE  /  0.3.1", "",
+        lines = [f"CODEX RATE  /  {__version__}", "",
                  names[value["mode"]], f"会话：{value['thread'] or '--'}",
                  states.get(m["state"], m["state"]), "",
                  f"本轮输出：{number(m['output'])} token（含推理）",
@@ -344,7 +399,25 @@ class Strip:
                  "含生成工具参数的时间，不是纯解码速度。",
                  "~ 表示本轮尚未结束，保留最近一次测量。",
                  "缓存命中率 = 本轮缓存输入 / 本轮输入。",
+                 "统计范围：当前会话；子代理用量不并入主会话。",
                  "左键拖动位置 · 双击详情 · 右键菜单"]
+        activity = m.get("activity")
+        if activity:
+            lines += ["", "最近活动：" + ACTIVITY_NAMES.get(activity, activity)]
+        if m.get("sampled_at_ms") is not None:
+            age = max(0, int(time.time() - m["sampled_at_ms"] / 1000))
+            lines.append(f"距最近计量：{age} 秒（响应完成后更新）")
+        reader_status = value.get("reader")
+        if reader_status:
+            if reader_status["recovering"]:
+                phase = {"pending": "准备读取", "searching": "查找本轮起点", "replaying": "恢复本轮计量"}.get(reader_status["recovery_state"], "读取中")
+                lines.append(f"恢复阶段：{phase} · 已读取 {reader_status['recovery_bytes'] / 1024**2:.1f} MiB")
+            if reader_status["recovery_limited"]:
+                lines.append("已达到本轮起点回溯上限，缺失起点时不计算 TPS。")
+            if reader_status["skipped_non_metric"]:
+                lines.append(f"已跳过 {reader_status['skipped_non_metric']} 条超大非计量内容记录。")
+            if reader_status["backlog_bytes"]:
+                lines.append(f"日志追赶中：尚有 {reader_status['backlog_bytes'] / 1024**2:.1f} MiB 待读。")
         issues = list(m["warnings"])
         if value["error"]:
             issues.append(value["error"])
@@ -353,7 +426,7 @@ class Strip:
         if self.tray.error:
             issues.append("tray-unavailable")
         if issues:
-            lines += ["", "数据状态：" + ", ".join(issues)]
+            lines += ["", "数据状态："] + [STATUS_MESSAGES.get(issue, issue) for issue in dict.fromkeys(issues)]
         return "\n".join(lines)
 
     def show_details(self):
@@ -565,8 +638,13 @@ def main():
                 if monitor.active.snapshot()["thread"] or args.thread:
                     break
                 time.sleep(0.1)
-            monitor.update()
-            print(json.dumps(monitor.update(), ensure_ascii=False, indent=2))
+            deadline = time.monotonic() + 15
+            while True:
+                value = monitor.update()
+                if value["error"] not in ("conversation-loading", "log-recovering") or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            print(json.dumps(value, ensure_ascii=False, indent=2))
         finally:
             monitor.ipc.stop.set()
             monitor.active.close()

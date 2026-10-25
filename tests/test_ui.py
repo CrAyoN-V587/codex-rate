@@ -73,6 +73,7 @@ class StripTests(unittest.TestCase):
         strip.accent = "#111111"
         strip.fields = [Mock(), Mock(), Mock()]
         strip.status = Mock()
+        strip.last_detection = Mock()
         strip.tray = Mock(events=queue.SimpleQueue())
         strip.paint = Mock()
         strip.save = Mock()
@@ -82,6 +83,52 @@ class StripTests(unittest.TestCase):
             "thread": self.threads[0], "error": None, "mode": "ipc",
             "measurement": {"tps": 100, "state": "completed", "output": 200,
                             "cache_percent": 50}})
+
+    def test_tool_and_agent_status_retain_trusted_values_but_loading_clears(self):
+        strip = self.strip
+        data = strip.data.return_value
+        data["measurement"]["state"] = "active"
+        for activity, label in (("tool", "工具"), ("agent", "代理"), ("waiting-response", "等待")):
+            data["measurement"]["activity"] = activity
+            strip.tick()
+            self.assertEqual(strip.fields[0].configure.call_args.kwargs["text"], "~100.0 tok/s")
+            self.assertEqual(strip.fields[1].configure.call_args.kwargs["text"], "200")
+            self.assertEqual(strip.fields[2].configure.call_args.kwargs["text"], "50%")
+            self.assertEqual(strip.status.configure.call_args.kwargs["text"], label)
+        data["error"] = "conversation-loading"
+        strip.tick()
+        self.assertEqual(strip.fields[0].configure.call_args.kwargs["text"], "-- tok/s")
+        self.assertEqual(strip.fields[1].configure.call_args.kwargs["text"], "--")
+        self.assertEqual(strip.fields[2].configure.call_args.kwargs["text"], "--")
+
+    def test_footer_age_advances_without_new_usage_and_clears_when_unavailable(self):
+        strip = self.strip
+        strip.data.return_value["measurement"]["sampled_at_ms"] = 1000
+        for now, expected in ((2, "上次检测：1秒之前"), (8, "上次检测：7秒之前"), (0, "上次检测：0秒之前")):
+            with patch("codex_rate.app.time.time", return_value=now):
+                strip.tick()
+            self.assertEqual(strip.last_detection.configure.call_args.kwargs["text"], expected)
+        strip.data.return_value["error"] = "conversation-loading"
+        strip.tick()
+        self.assertEqual(strip.last_detection.configure.call_args.kwargs["text"], "上次检测：--")
+        strip.data.return_value["error"] = None
+        strip.data.return_value["measurement"]["sampled_at_ms"] = None
+        strip.tick()
+        self.assertEqual(strip.last_detection.configure.call_args.kwargs["text"], "上次检测：--")
+
+    def test_details_explain_activity_age_and_missing_data_in_chinese(self):
+        from codex_rate.metrics import Meter
+        strip = self.strip
+        strip.tray.error = None
+        measurement = Meter().snapshot().to_dict()
+        measurement.update(activity="agent", sampled_at_ms=1000)
+        data = dict(mode="active", thread="test", error="active-reader-stale", measurement=measurement)
+        with patch("codex_rate.app.time.time", return_value=4):
+            description = Strip.describe(strip, data)
+        self.assertIn("最近活动：子代理调度", description)
+        self.assertIn("距最近计量：3 秒", description)
+        self.assertIn("页面识别暂未响应", description)
+        self.assertIn("子代理用量不并入主会话", description)
 
     def test_menu_commands_can_run_after_popup_returns(self):
         strip = self.strip
@@ -244,6 +291,7 @@ class StripTests(unittest.TestCase):
         strip.frame.winfo_reqheight.return_value = 50
         strip.surface = Mock()
         strip.outline, strip.body = 1, 2
+        strip.frame_window = 3
         strip.layout()
         requested = strip.surface.configure.call_args.kwargs
         geometry = strip.root.geometry.call_args.args[0]

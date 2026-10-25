@@ -64,6 +64,8 @@ class Measurement:
     carrier: str
     samples: int
     warnings: tuple[str, ...]
+    activity: str
+    sampled_at_ms: int | None
 
     def to_dict(self):
         return asdict(self)
@@ -90,6 +92,7 @@ class Meter:
         self.start_ms = None
         self.end_ms = None
         self.measured_ms = None
+        self.activity = "idle"
 
     def begin(self, turn_id, started, start_ms=None):
         if self.turn_id == turn_id and self.started and started:
@@ -99,6 +102,7 @@ class Meter:
         self.turn_id = turn_id
         self.started = started
         self.state = "waiting"
+        self.activity = "waiting"
         self.start_ms = start_ms
 
     def _align(self, turn_id):
@@ -126,7 +130,22 @@ class Meter:
         if not isinstance(p, dict):
             return
         event = p.get("type") if kind == "event_msg" else kind
-        if event == "reader_error":
+        if event == "response_item":
+            # Only read control metadata, never tool arguments or message bodies.
+            # This describes the last observed activity, not child-agent usage.
+            if not self.started or self.state in ("aborted", "completed"):
+                return
+            item_type = p.get("type")
+            if item_type in ("function_call", "custom_tool_call"):
+                name = str(p.get("name", "")).rsplit(".", 1)[-1]
+                self.activity = "agent" if name in {
+                    "spawn_agent", "wait_agent", "send_message", "followup_task",
+                    "interrupt_agent", "list_agents"} else "tool"
+            elif item_type in ("function_call_output", "custom_tool_call_output"):
+                self.activity = "waiting-response"
+            elif item_type == "reasoning" or (item_type == "message" and p.get("role") == "assistant"):
+                self.activity = "model"
+        elif event == "reader_error":
             self.bad = True
             self.warnings.add("malformed-jsonl")
         elif event == "task_started":
@@ -137,6 +156,11 @@ class Meter:
             item_type = item.get("type") if isinstance(item, dict) else None
             if item_type not in self.MODEL_TYPES | self.TOOL_TYPES:
                 return
+            if self.state not in ("aborted", "completed"):
+                if item_type in self.MODEL_TYPES:
+                    self.activity = "model"
+                elif item_type == "SubAgentActivity":
+                    self.activity = "agent"
             start, end = p.get("started_at_ms"), p.get("completed_at_ms")
             if type(start) is not int or type(end) is not int or start <= 0 or end < start:
                 self.bad = True
@@ -186,6 +210,7 @@ class Meter:
                 self.state = "aborted"
             else:
                 self.state = "completed"
+            self.activity = self.state
 
     def _sample(self, key, raw, end_ms):
         usage = Usage.parse(raw)
@@ -203,6 +228,8 @@ class Meter:
         self.usage += usage
         if self.state not in ("aborted", "completed"):
             self.state = "active"
+            if self.activity in ("idle", "waiting"):
+                self.activity = "model"
         self.end_ms = end_ms
         self._publish()
         return True
@@ -225,7 +252,7 @@ class Meter:
             usage.cached * 100 / usage.input if usage and usage.input else None,
             tps, self.measured_ms, self.started,
             "token_usage_record" if self.modern else "token_count",
-            self.samples, tuple(sorted(warnings)))
+            self.samples, tuple(sorted(warnings)), self.activity, self.end_ms)
 
 
 def compact(value):

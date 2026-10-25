@@ -65,13 +65,13 @@ class ActiveConversation
             SafeHandle handle = field.GetValue(element) as SafeHandle;
             if (handle == null || handle.IsInvalid || handle.IsClosed) continue;
             object value;
-            if (UiaGetPropertyValue(handle.DangerousGetHandle(), 30102, out value) >= 0)
-                return value as string;
+            Marshal.ThrowExceptionForHR(UiaGetPropertyValue(handle.DangerousGetHandle(), 30102, out value));
+            return value as string;
         }
         return null;
     }
 
-    static object Read()
+    static object ReadPage()
     {
         IntPtr hwnd = Window();
         if (hwnd == IntPtr.Zero) return new { window = 0, titles = new string[0], error = "no-codex-window" };
@@ -95,6 +95,19 @@ class ActiveConversation
             if (!String.IsNullOrWhiteSpace(title)) titles.Add(title);
         }
         return new { window = hwnd.ToInt64(), titles = new List<string>(titles), error = (string)null };
+    }
+
+    static object Read()
+    {
+        // Navigation controls can disappear during a scan. Discard partial titles
+        // and retry the whole page once; an incomplete scan cannot prove selection.
+        for (int attempt = 0; attempt < 2; attempt++)
+        {
+            try { return ReadPage(); }
+            catch (ElementNotAvailableException) { }
+            catch (COMException) { }
+        }
+        return new { window = 0, titles = new string[0], error = "active-page-changing" };
     }
 
     [STAThread]
