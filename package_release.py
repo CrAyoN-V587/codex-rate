@@ -12,7 +12,7 @@ def main():
     if not executable.is_file():
         raise SystemExit("Run build.cmd before creating the release ZIP.")
     files = [(executable, "CodexRate.exe")]
-    for name in ("README.md", "Start-Codex-Rate.cmd", "THIRD_PARTY_NOTICES.md", "RELEASE_NOTES.md"):
+    for name in ("README.md", "README.en.md", "Start-Codex-Rate.cmd", "THIRD_PARTY_NOTICES.md", "RELEASE_NOTES.md"):
         files.append((root / name, name))
     files.extend((path, "licenses/" + path.name) for path in sorted((root / "licenses").glob("*.txt")))
     for path, _ in files:
